@@ -157,15 +157,19 @@ def _mirror(cfg, n_channels):
     return network.flip_sign(n_channels).astype(np.float32)
 
 
-def train(blocks, cfg=None, log=print, meta=None):
-    """Fit on `blocks` (game_inputs tuples). Returns a network.SeqModel."""
+def train(blocks, cfg=None, log=print, meta=None, device="cpu"):
+    """Fit on `blocks` (game_inputs tuples). Returns a network.SeqModel.
+
+    device: "cpu" (the shipped, byte-reproducible path) or a torch device such as "cuda" (e.g. on
+    a Kaggle GPU, for experiments). Batches and noise are drawn on the CPU either way, so only
+    the arithmetic moves; GPU results are repeatable on the same GPU but not equal to the CPU's."""
     import torch
     import torch.nn.functional as F
 
     cfg = dict(TRAIN_DEFAULTS, **(cfg or {}))
     torch.manual_seed(cfg["seed"])
     torch.set_num_threads(int(cfg["threads"]))
-    torch.use_deterministic_algorithms(True)
+    torch.use_deterministic_algorithms(True, warn_only=device != "cpu")
     rng = np.random.RandomState(cfg["seed"])
 
     seqs = _sequences(blocks, cfg)
@@ -181,7 +185,7 @@ def train(blocks, cfg=None, log=print, meta=None):
     del rest
     scale32 = scale.astype(np.float32)
 
-    net = _net(cin, cfg, heads)
+    net = _net(cin, cfg, heads).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=cfg["lr"], total_steps=cfg["steps"],
                                                 pct_start=0.1)
@@ -218,9 +222,11 @@ def train(blocks, cfg=None, log=print, meta=None):
         wb = torch.from_numpy(np.stack(wb).astype(np.float32))
         if cfg["input_noise"] > 0:
             xb = xb + cfg["input_noise"] * torch.randn(xb.shape)
+        xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
         logits = net(xb)
         if heads > 1:
-            logits = logits.view(len(hb), heads, 3, -1)[torch.arange(len(hb)), torch.tensor(hb)]
+            rows = torch.arange(len(hb), device=device)
+            logits = logits.view(len(hb), heads, 3, -1)[rows, torch.tensor(hb, device=device)]
         per_frame = F.cross_entropy(logits, yb, ignore_index=-100, reduction="none")
         valid = (yb != -100).float() * wb
         loss = (per_frame * valid).sum() / valid.sum().clamp(min=1.0)
@@ -232,7 +238,8 @@ def train(blocks, cfg=None, log=print, meta=None):
         if log and (step % 100 == 0 or step == cfg["steps"] - 1):
             log("step {} loss {:.4f}".format(step, loss.item()))
 
-    weights = {k: v.detach().numpy().astype(np.float64) for k, v in net.state_dict().items()}
+    weights = {k: v.detach().cpu().numpy().astype(np.float64)
+               for k, v in net.state_dict().items()}
     arch = {"stride": cfg["stride"], "channels": cfg["channels"],
             "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"]), "heads": heads}
     info = {k: (list(v) if isinstance(v, tuple) else v) for k, v in cfg.items()}
