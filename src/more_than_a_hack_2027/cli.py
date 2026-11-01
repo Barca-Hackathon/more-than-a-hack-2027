@@ -183,6 +183,43 @@ def _cmd_tune(args):
     return 0
 
 
+def _cmd_train_seq(args):
+    import warnings
+
+    from .seq import network, training
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    blocks = [training.game_inputs(s, g) for s in args.seeds for g in args.games]
+    model = training.train(blocks, meta={"games": list(args.games), "seeds": list(args.seeds),
+                                         "variant": "degraded"})
+    model.to_json(args.out)
+    print("wrote {}".format(args.out))
+    return 0
+
+
+def _cmd_tune_seq(args):
+    import warnings
+
+    from .seq import tuning
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    configs = tuning.grid()
+    runs = tuning.run(tuple(args.train_seeds), tuple(args.seeds), tuple(args.games),
+                       configs=configs)
+    text = tuning.markdown(runs, configs, tuple(args.train_seeds), tuple(args.seeds),
+                            tuple(args.games), None)
+    print(text)
+    if args.out:
+        with open(args.out, "w") as handle:
+            handle.write(text)
+        print("wrote {}".format(args.out))
+    if args.csv:
+        os.makedirs(os.path.dirname(os.path.abspath(args.csv)), exist_ok=True)
+        runs.to_csv(args.csv, index=False)
+        print("wrote {}".format(args.csv))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="more-than-a-hack-2027", description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -199,7 +236,7 @@ def build_parser():
     p.set_defaults(func=_cmd_deadball)
 
     p = sub.add_parser("predict", help="write a submission CSV")
-    p.add_argument("--method", default="v2", choices=("baseline", "hmm-nearest", "v1", "v2"),
+    p.add_argument("--method", default="v2", choices=("baseline", "hmm-nearest", "v1", "v2", "v3"),
                    help="default: the frozen submission method (pipeline.SUBMISSION_METHOD)")
     p.add_argument("--window", type=int, default=50, help="baseline smoothing half-width")
     p.add_argument("--out", required=True, help="output CSV path")
@@ -243,6 +280,22 @@ def build_parser():
     p.add_argument("--out", help="write the Markdown table here (e.g. docs/ABLATION.md)")
     p.add_argument("--csv", help="also write the per-(row, seed, game) scores (keep it in .cache/)")
     p.set_defaults(func=_cmd_ablate)
+    p = sub.add_parser("train-seq",
+                       help="train the v3 sequence model on the degraded Metrica games (torch)")
+    p.add_argument("--out", default=None, help="model JSON (default: the shipped model)")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5],
+                   help="degradation seeds")
+    p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
+    p.set_defaults(func=_cmd_train_seq)
+
+    p = sub.add_parser("tune-seq",
+                       help="held-out decoder choice for v3 on the external games (torch)")
+    p.add_argument("--train-seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5])
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2], help="evaluation seeds")
+    p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
+    p.add_argument("--out", help="write the Markdown table here (e.g. docs/TUNING_V3.md)")
+    p.add_argument("--csv", help="also write the per-run scores (keep it in .cache/)")
+    p.set_defaults(func=_cmd_tune_seq)
     return parser
 
 
@@ -250,6 +303,9 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.command == "train-control" and args.out is None:
         from .stages.control import DEFAULT_MODEL
+        args.out = DEFAULT_MODEL
+    if args.command == "train-seq" and args.out is None:
+        from .seq.network import DEFAULT_MODEL
         args.out = DEFAULT_MODEL
     if getattr(args, "out", None):
         folder = os.path.dirname(os.path.abspath(args.out))

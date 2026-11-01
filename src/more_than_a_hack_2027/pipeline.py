@@ -170,6 +170,50 @@ def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
     return labels
 
 
+# v3: one learned sequence model (network.py) gives log P(H), log P(A), log P(D) per frame from
+# the tracking geometry, the GT-free dead-ball outputs and the control features. The decoder is
+# the same Viterbi with a minimum stoppage length; its settings are chosen on the external games.
+V3_DEFAULTS = {
+    "w_seq": 0.5,          # weight on the model's log-probabilities
+    "switch": 20.0,
+    "stop": 10.0,
+    "restart": 10.0,
+    "min_dead_s": 1.0,
+    "w_restart": 0.0,      # restart-team evidence (restart.py); the model sees no Smart Tagging
+}
+
+
+def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
+    """cfg: V3_DEFAULTS keys plus optional stage overrides. model: a network.SeqModel; None
+    loads the shipped models/seq_v1.json."""
+    from .stages import deadball, restart
+    from .seq import network
+    from .stages.ball import clean_ball
+    from .data.tagging import load_tags
+
+    top, stages = split_cfg(cfg, V3_DEFAULTS)
+    model = model if model is not None else network.SeqModel.from_json()
+    ball = clean_ball(ctx, stages["ball"])
+    dead = deadball.detect(ctx, ball, stages["deadball"])
+    X, swap_sign = network.inputs(ctx, ball, dead, stages["control"])
+    lp = network.logprobs(ctx, model, X, swap_sign)
+    graded = ctx.half_of_frame > 0
+    evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
+    calls = ()
+    if top["w_restart"]:
+        if tags is None:
+            tags = load_tags(ctx) if ctx.game == games.GAME else ()
+        calls = restart.decide(ctx, dead, tags, stages["restart"])
+        evidence[:, :2] += top["w_restart"] * restart.frame_evidence(ctx, calls, stages["restart"])
+
+    trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
+    labels = decode.decode_match(evidence, ctx.halves, trans,
+                                 min_dead=int(round(top["min_dead_s"] * ctx.fps)))
+    if return_parts:
+        return labels, {"dead": dead, "calls": calls, "evidence": evidence, "logprobs": lp}
+    return labels
+
+
 # The frozen submission method (docs/PLAN.md, M3). `predict` without --method runs this, and
 # scripts/check_reproducibility.sh checks it from a clean copy of the repository.
 SUBMISSION_METHOD = "v2"
@@ -187,4 +231,6 @@ def run(method, ctx, **kwargs):
         return run_v1(ctx, kwargs.get("cfg"), tags=kwargs.get("tags"))
     if method == "v2":
         return run_v2(ctx, kwargs.get("cfg"), tags=kwargs.get("tags"), model=kwargs.get("model"))
+    if method == "v3":
+        return run_v3(ctx, kwargs.get("cfg"), tags=kwargs.get("tags"), model=kwargs.get("model"))
     raise ValueError("unknown method {!r}".format(method))
