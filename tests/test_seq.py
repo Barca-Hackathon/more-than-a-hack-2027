@@ -144,3 +144,43 @@ def test_mirror_sign_matches_the_left_right_mirrored_match(synthetic):
     geo = network.geometry_inputs(ctx, clean_ball(ctx))
     geo_other = network.geometry_inputs(other, clean_ball(other))
     np.testing.assert_allclose(geo * network.flip_sign(geo.shape[1]), geo_other, atol=1e-9)
+
+
+def test_an_auxiliary_training_head_does_not_change_predictions():
+    model = _random_model(7)
+    two = network.SeqModel(dict(model.arch, heads=2), model.scale, dict(model.weights))
+    rng = np.random.RandomState(5)
+    two.weights["head.3.weight"] = np.concatenate([model.weights["head.3.weight"],
+                                                   rng.randn(3, 8, 1)])
+    two.weights["head.3.bias"] = np.concatenate([model.weights["head.3.bias"], rng.randn(3)])
+    X = rng.randn(60, 7)
+    np.testing.assert_allclose(two.forward(X), model.forward(X), atol=1e-12)
+
+
+def _training_block(seed, n=300, extra=10):
+    rng = np.random.RandomState(seed)
+    sign = np.concatenate([network.BALL_SWAP, network.TEAM_SWAP, network.TEAM_SWAP,
+                           np.ones(extra)])
+    X = rng.randn(n, len(sign)).astype(np.float32)
+    labels = rng.randint(0, 3, n).astype(np.int8)
+    return X, sign, labels, np.ones(n, bool), ((1, 0, n // 2 - 1), (2, n // 2, n - 1))
+
+
+@pytest.mark.parametrize("with_aux", [False, True])
+def test_training_runs_with_and_without_an_auxiliary_dataset(with_aux, tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    from more_than_a_hack_2027.seq import training
+
+    aux = ()
+    if with_aux:
+        monkeypatch.setattr(training, "CACHE_DIR", str(tmp_path))
+        X, sign, labels, graded, halves = _training_block(1)
+        np.savez(tmp_path / "aux.npz", X=X, swap_sign=sign, labels=labels, graded=graded,
+                 halves=np.array(halves))
+        aux = ("aux.npz",)
+    cfg = {"channels": 8, "dilations": (1, 2), "steps": 2, "batch": 2, "crop": 100,
+           "threads": 1, "aux": aux}
+    model = training.train([_training_block(0)], cfg, log=None)
+    assert model.arch["heads"] == (2 if with_aux else 1)
+    lp = model.forward(_training_block(2)[0])
+    assert lp.shape == (300, 3) and np.isfinite(lp).all()

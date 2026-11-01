@@ -314,8 +314,8 @@ class SeqModel:
         up = np.einsum("tc,coj->tjo", h, W["up.weight"]).reshape(n * stride, -1) + W["up.bias"]
         u = up + _conv(x, W["skip.weight"], W["skip.bias"])
         z = _conv(gelu(u), W["head.1.weight"], W["head.1.bias"])
-        logits = gelu(z) @ W["head.3.weight"][:, :, 0].T + W["head.3.bias"]
-        logits = logits[:T]
+        logits = gelu(z) @ W["head.3.weight"][:3, :, 0].T + W["head.3.bias"][:3]
+        logits = logits[:T]                        # head 0; any auxiliary head is training-only
         m = logits.max(axis=1, keepdims=True)
         return logits - m - np.log(np.exp(logits - m).sum(axis=1, keepdims=True))
 

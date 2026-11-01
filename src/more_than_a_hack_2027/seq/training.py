@@ -36,6 +36,9 @@ TRAIN_DEFAULTS = {
     "turn_weight": 0.0,     # extra loss weight within turn_frames of a possession change
     "turn_frames": 12,
     "flip": False,          # also train on left-right mirrored copies, and average them at test
+    "aux": (),              # cached input files (CACHE_DIR) of an auxiliary dataset, e.g. the
+                            # open DFL matches, learned through a second output head
+    "aux_p": 0.5,           # share of batch rows drawn from the auxiliary dataset
 }
 CACHE_DIR = os.path.join(_paths.CACHE_DIR, "seq_inputs")
 
@@ -58,7 +61,13 @@ def game_inputs(seed, game):
     return X, swap_sign, eg.labels, graded, eg.ctx.halves
 
 
-def _net(cin, cfg):
+def load_cached(name):
+    z = np.load(os.path.join(CACHE_DIR, name))
+    return (z["X"], z["swap_sign"], z["labels"], z["graded"],
+            tuple(tuple(int(v) for v in row) for row in z["halves"]))
+
+
+def _net(cin, cfg, heads=1):
     import torch.nn as nn
     import torch.nn.functional as F
 
@@ -93,7 +102,7 @@ def _net(cin, cfg):
             self.up = nn.ConvTranspose1d(ch, ch, s, stride=s)
             self.skip = nn.Conv1d(cin, ch, 5, padding=2)
             self.head = nn.Sequential(nn.GELU(approximate="tanh"), nn.Conv1d(ch, ch, 5, padding=2),
-                                      nn.GELU(approximate="tanh"), nn.Conv1d(ch, 3, 1))
+                                      nn.GELU(approximate="tanh"), nn.Conv1d(ch, 3 * heads, 1))
 
         def forward(self, x):
             h = self.down(x)
@@ -157,6 +166,8 @@ def train(blocks, cfg=None, log=print, meta=None):
     rng = np.random.RandomState(cfg["seed"])
 
     seqs = _sequences(blocks, cfg)
+    aux = _sequences([load_cached(name) for name in cfg["aux"]], cfg) if cfg["aux"] else []
+    heads = 2 if aux else 1
     cin = seqs[0][0].shape[1]
     geo = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
     scale = np.ones(cin)
@@ -165,19 +176,25 @@ def train(blocks, cfg=None, log=print, meta=None):
     del rest
     scale32 = scale.astype(np.float32)
 
-    net = _net(cin, cfg)
+    net = _net(cin, cfg, heads)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=cfg["lr"], total_steps=cfg["steps"],
                                                 pct_start=0.1)
-    lengths = np.array([len(x) for x, _, _ in seqs], dtype=np.float64)
-    probs = lengths / lengths.sum()
+    pools = [seqs] + ([aux] if aux else [])
+    probs = []
+    for pool in pools:
+        lengths = np.array([len(x) for x, _, _ in pool], dtype=np.float64)
+        probs.append(lengths / lengths.sum())
     crop = int(cfg["crop"])
     mirror = _mirror(cfg, cin)
     net.train()
     for step in range(int(cfg["steps"])):
-        xb, yb, wb = [], [], []
+        xb, yb, wb, hb = [], [], [], []
         for _ in range(int(cfg["batch"])):
-            x, y, w = seqs[rng.choice(len(seqs), p=probs)]
+            head = int(bool(aux) and rng.rand() < cfg["aux_p"])
+            pool = pools[head]
+            x, y, w = pool[rng.choice(len(pool), p=probs[head])]
+            hb.append(head)
             start = rng.randint(0, max(1, len(x) - crop))
             xs, ys, ws = x[start:start + crop], y[start:start + crop], w[start:start + crop]
             if mirror is not None and rng.rand() < 0.5:
@@ -194,7 +211,10 @@ def train(blocks, cfg=None, log=print, meta=None):
         wb = torch.from_numpy(np.stack(wb).astype(np.float32))
         if cfg["input_noise"] > 0:
             xb = xb + cfg["input_noise"] * torch.randn(xb.shape)
-        per_frame = F.cross_entropy(net(xb), yb, ignore_index=-100, reduction="none")
+        logits = net(xb)
+        if heads > 1:
+            logits = logits.view(len(hb), heads, 3, -1)[torch.arange(len(hb)), torch.tensor(hb)]
+        per_frame = F.cross_entropy(logits, yb, ignore_index=-100, reduction="none")
         valid = (yb != -100).float() * wb
         loss = (per_frame * valid).sum() / valid.sum().clamp(min=1.0)
         opt.zero_grad()
@@ -207,7 +227,7 @@ def train(blocks, cfg=None, log=print, meta=None):
 
     weights = {k: v.detach().numpy().astype(np.float64) for k, v in net.state_dict().items()}
     arch = {"stride": cfg["stride"], "channels": cfg["channels"],
-            "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"])}
+            "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"]), "heads": heads}
     info = {k: (list(v) if isinstance(v, tuple) else v) for k, v in cfg.items()}
     info.update(meta or {})
     return network.SeqModel(arch, scale, weights, info)

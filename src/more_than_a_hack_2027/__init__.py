@@ -9,7 +9,7 @@ Layout:
     data/           the provided match: tracking, Smart Tagging, the shared Context
     stages/         pipeline building blocks: ball, nearest player, dead ball, control, restart,
                     decoder
-    external/       other matches (Metrica) and the degradation that makes them look like
+    external/       other matches (Metrica, open DFL) and the degradation that makes them look like
                     the competition data
     validation/     held-out scoring on the other matches: harness, decoder tuning, ablation
     seq/            v3: the temporal CNN (inputs + numpy network, torch training, tuning)
