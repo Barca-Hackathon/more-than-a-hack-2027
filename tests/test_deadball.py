@@ -2,8 +2,8 @@
 
 import numpy as np
 
-from more_than_a_hack_2027 import deadball
-from more_than_a_hack_2027.ball import clean_ball
+from more_than_a_hack_2027.stages import deadball
+from more_than_a_hack_2027.stages.ball import clean_ball
 
 CFG = deadball.DEADBALL_DEFAULTS
 

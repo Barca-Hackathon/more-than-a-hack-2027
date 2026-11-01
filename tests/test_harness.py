@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from more_than_a_hack_2027 import eval_external as ee
+from more_than_a_hack_2027.validation import harness as ee
 from more_than_a_hack_2027._paths import ensure_repo_on_path
 
 ensure_repo_on_path()

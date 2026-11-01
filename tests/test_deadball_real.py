@@ -23,7 +23,7 @@ pytestmark = pytest.mark.skipif(not DATA_PRESENT, reason="match data not in data
 @pytest.fixture(scope="module")
 def run():
     from more_than_a_hack_2027 import pipeline
-    from more_than_a_hack_2027.context import load_context
+    from more_than_a_hack_2027.data.context import load_context
     warnings.simplefilter("ignore", RuntimeWarning)
     ctx = load_context()
     labels, parts = pipeline.run_v1(ctx, return_parts=True)

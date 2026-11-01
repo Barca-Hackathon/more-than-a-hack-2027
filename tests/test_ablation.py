@@ -2,7 +2,9 @@
 
 import numpy as np
 
-from more_than_a_hack_2027 import ablation, control, pipeline
+from more_than_a_hack_2027.validation import ablation
+from more_than_a_hack_2027.stages import control
+from more_than_a_hack_2027 import pipeline
 from more_than_a_hack_2027._paths import ensure_repo_on_path
 
 ensure_repo_on_path()

@@ -5,7 +5,8 @@ import dataclasses
 import numpy as np
 import pytest
 
-from more_than_a_hack_2027 import control, pipeline
+from more_than_a_hack_2027.stages import control
+from more_than_a_hack_2027 import pipeline
 
 
 def moving_match(make_ctx, n=400, seed=0):
@@ -113,6 +114,6 @@ def test_training_can_leave_features_out(synthetic):
 
 
 def test_predict_defaults_to_the_frozen_submission_method():
-    from more_than_a_hack_2027 import build_parser
+    from more_than_a_hack_2027.cli import build_parser
     args = build_parser().parse_args(["predict", "--out", "x.csv"])
     assert args.method == pipeline.SUBMISSION_METHOD

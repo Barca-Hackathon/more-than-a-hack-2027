@@ -8,7 +8,7 @@ Treat a tag as a weak prior, never as a label (DATA.md).
 
 from dataclasses import dataclass, field
 
-from ._paths import ensure_repo_on_path
+from .._paths import ensure_repo_on_path
 from .context import AWAY, HOME
 
 ensure_repo_on_path()

@@ -4,11 +4,11 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from more_than_a_hack_2027 import restart
-from more_than_a_hack_2027.context import AWAY, HOME
-from more_than_a_hack_2027.deadball import Kickoff, OutEpisode, Stoppage
-from more_than_a_hack_2027.io_tagging import Tag, team_code
-from more_than_a_hack_2027.nearest_player import NOBODY
+from more_than_a_hack_2027.stages import restart
+from more_than_a_hack_2027.data.context import AWAY, HOME
+from more_than_a_hack_2027.stages.deadball import Kickoff, OutEpisode, Stoppage
+from more_than_a_hack_2027.data.tagging import Tag, team_code
+from more_than_a_hack_2027.stages.nearest_player import NOBODY
 
 
 def test_last_toucher_is_latest_close_player():

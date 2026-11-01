@@ -23,7 +23,7 @@ import xml.etree.ElementTree as ET
 import numpy as np
 import pandas as pd
 
-from ._paths import CACHE_DIR, ensure_repo_on_path
+from .._paths import CACHE_DIR, ensure_repo_on_path
 
 ensure_repo_on_path()
 import games  # noqa: E402

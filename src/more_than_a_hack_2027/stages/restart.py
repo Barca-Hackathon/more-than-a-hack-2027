@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .context import AWAY, HOME
+from ..data.context import AWAY, HOME
 from .nearest_player import NOBODY
 
 RESTART_DEFAULTS = {

@@ -61,8 +61,8 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ._paths import CACHE_DIR, OTHER_MATCHES_DIR, ensure_repo_on_path
-from .context import AWAY, HOME, Context
+from .._paths import CACHE_DIR, OTHER_MATCHES_DIR, ensure_repo_on_path
+from ..data.context import AWAY, HOME, Context
 
 ensure_repo_on_path()
 import possession_metrics as pm  # noqa: E402

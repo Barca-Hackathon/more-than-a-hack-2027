@@ -9,9 +9,9 @@
 
 import numpy as np
 
-from . import decode
+from .stages import decode
 from ._paths import ensure_repo_on_path
-from .nearest_player import NOBODY, nearest_player
+from .stages.nearest_player import NOBODY, nearest_player
 
 ensure_repo_on_path()
 import baseline as starter_baseline  # noqa: E402  starter/baseline.py
@@ -98,9 +98,9 @@ def run_v1(ctx, cfg=None, return_parts=False, tags=None):
     tags: Smart Tagging intervals; None loads them for the competition match, and no other game
     has any (the external games run without them).
     """
-    from . import deadball, restart
-    from .ball import clean_ball
-    from .io_tagging import load_tags
+    from .stages import deadball, restart
+    from .stages.ball import clean_ball
+    from .data.tagging import load_tags
 
     top, stages = split_cfg(cfg)
     ball = clean_ball(ctx, stages["ball"])
@@ -123,7 +123,7 @@ def run_v1(ctx, cfg=None, return_parts=False, tags=None):
 
 
 # v2: v1 with the learned control stage (control.py) as the team evidence. w_control and the
-# penalties are chosen on the external games (eval_external), not here.
+# penalties are chosen on the external games (validation/harness.py), not here.
 V2_DEFAULTS = {
     # Chosen on the degraded external games by tune.py (docs/TUNING.md): best mean spellF1
     # under both label readings, 3 seeds, each game scored by a model that did not see it.
@@ -143,9 +143,9 @@ V2_DEFAULTS = {
 def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
     """cfg: V2_DEFAULTS keys plus optional stage overrides ("ball", "deadball", "restart",
     "control"). model: a control.ControlModel; None loads the shipped models/control_v1.json."""
-    from . import control, deadball, restart
-    from .ball import clean_ball
-    from .io_tagging import load_tags
+    from .stages import control, deadball, restart
+    from .stages.ball import clean_ball
+    from .data.tagging import load_tags
 
     top, stages = split_cfg(cfg, V2_DEFAULTS)
     model = model if model is not None else control.ControlModel.from_json()
