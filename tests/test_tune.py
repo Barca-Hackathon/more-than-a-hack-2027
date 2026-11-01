@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from more_than_a_hack_2027 import tune
+from more_than_a_hack_2027.validation import tune
 
 
 def _runs(scores):

@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(not DATA_PRESENT, reason="match data not in data
 
 @pytest.fixture(scope="module")
 def ctx():
-    from more_than_a_hack_2027.context import load_context
+    from more_than_a_hack_2027.data.context import load_context
     return load_context()
 
 
@@ -38,7 +38,7 @@ def test_published_coverage_numbers(ctx):
 
 def test_attack_direction_matches_goalkeeper_positions(ctx):
     # The team attacking +x defends x=0, so its goalkeeper-side extreme is the lower one.
-    from more_than_a_hack_2027.context import AWAY, HOME
+    from more_than_a_hack_2027.data.context import AWAY, HOME
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         for half, frames in ctx.half_slices():

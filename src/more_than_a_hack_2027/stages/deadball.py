@@ -31,7 +31,7 @@ import pandas as pd
 
 from . import hmm2
 from .ball import clean_ball
-from .context import AWAY, HOME
+from ..data.context import AWAY, HOME
 from .nearest_player import NOBODY, nearest_player
 
 DEADBALL_DEFAULTS = {

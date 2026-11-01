@@ -10,17 +10,17 @@ import warnings
 import numpy as np
 import pytest
 
-from more_than_a_hack_2027 import external
+from more_than_a_hack_2027.external import metrica
 
-DATA_PRESENT = all(os.path.isfile(os.path.join(external.RAW_DIR, rel))
-                   for game in external.GAMES for rel in external.FILES[game])
+DATA_PRESENT = all(os.path.isfile(os.path.join(metrica.RAW_DIR, rel))
+                   for game in metrica.GAMES for rel in metrica.FILES[game])
 pytestmark = pytest.mark.skipif(not DATA_PRESENT, reason="Metrica sample data not downloaded")
 
 
-@pytest.mark.parametrize("game", external.GAMES)
+@pytest.mark.parametrize("game", metrica.GAMES)
 def test_event_labels_are_plausible(game):
-    eg = external.load_game(game)
-    stats = external.possession_stats(eg.labels, eg.ctx.halves)
+    eg = metrica.load_game(game)
+    stats = metrica.possession_stats(eg.labels, eg.ctx.halves)
     assert 0.25 <= stats["dead_share"] <= 0.5
     assert 200 <= stats["n_spells"] <= 320
     assert 6.0 <= stats["spell_median_s"] <= 13.0
@@ -28,22 +28,22 @@ def test_event_labels_are_plausible(game):
     assert 0.4 <= stats["home_share_alive"] <= 0.6
 
 
-@pytest.mark.parametrize("game", external.GAMES)
+@pytest.mark.parametrize("game", metrica.GAMES)
 def test_label_rules_only_change_who_has_the_ball(game):
-    eg = external.load_game(game)
-    old = external.load_game(game, rules=())
-    alt = external.load_game(game, rules=("loss",))
+    eg = metrica.load_game(game)
+    old = metrica.load_game(game, rules=())
+    alt = metrica.load_game(game, rules=("loss",))
     for other in (old, alt):
-        assert np.array_equal(eg.labels == external.pm.D, other.labels == external.pm.D)
-        assert np.array_equal(eg.labels == external.pm.X, other.labels == external.pm.X)
-    spells = [external.possession_stats(x.labels, eg.ctx.halves)["n_spells"]
+        assert np.array_equal(eg.labels == metrica.pm.D, other.labels == metrica.pm.D)
+        assert np.array_equal(eg.labels == metrica.pm.X, other.labels == metrica.pm.X)
+    spells = [metrica.possession_stats(x.labels, eg.ctx.halves)["n_spells"]
               for x in (old, alt, eg)]
     assert spells[0] > spells[1] > spells[2]            # each rule only removes possessions
     assert 300 <= spells[0] <= 500                      # the older labels, as first measured
 
 
 def test_v1_beats_the_baseline_on_degraded_games():
-    from more_than_a_hack_2027 import eval_external as ee
+    from more_than_a_hack_2027.validation import harness as ee
     warnings.simplefilter("ignore", RuntimeWarning)
     games = ee.load_games(variants=("degraded",), missing_counts=np.zeros(10, dtype=np.int16))
     methods = {m: ee.METHODS[m] for m in ("baseline", "v1")}
@@ -53,7 +53,7 @@ def test_v1_beats_the_baseline_on_degraded_games():
 
 
 def test_v2_held_out_beats_v1_on_degraded_games():
-    from more_than_a_hack_2027 import eval_external as ee
+    from more_than_a_hack_2027.validation import harness as ee
     warnings.simplefilter("ignore", RuntimeWarning)
     games = ee.load_games(variants=("degraded",), missing_counts=np.zeros(10, dtype=np.int16))
     models = ee.logo_models(games)

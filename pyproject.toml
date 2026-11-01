@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.scripts]
-more-than-a-hack-2027 = "more_than_a_hack_2027:main"
+more-than-a-hack-2027 = "more_than_a_hack_2027.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.12.24,<0.13.0"]

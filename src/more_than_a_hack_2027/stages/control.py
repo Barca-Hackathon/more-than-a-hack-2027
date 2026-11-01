@@ -7,7 +7,7 @@ deflection. With the true team on every live frame, v1 would gain ~0.15 spellF1 
 while perfect dead-ball calls would add ~0.01, so this stage is where the score is.
 
 Model. A logistic regression on windowed features of the ball and both teams, trained on the
-Metrica games' event-derived labels (external.py) on degraded tracking (degrade.py), never on
+Metrica games' event-derived labels (metrica.py) on degraded tracking (degrade.py), never on
 BAR-ATH. Every feature is written from the home team's side and is ANTISYMMETRIC: swapping the
 two teams negates it. With no intercept the model is therefore exactly team-symmetric -- it
 cannot learn "home has the ball more", which would not transfer between games.
@@ -38,8 +38,9 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from .._paths import MODEL_DIR
+from ..data.context import AWAY, HOME
 from .ball import clean_ball
-from .context import AWAY, HOME
 
 CONTROL_DEFAULTS = {
     "far_m": 30.0,              # distance used when a team has no tracked player
@@ -55,7 +56,6 @@ CONTROL_DEFAULTS = {
     "zmax": 8.0,                # clip on the log-odds before it becomes evidence
 }
 
-MODEL_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models")
 DEFAULT_MODEL = os.path.join(MODEL_DIR, "control_v1.json")
 
 
@@ -229,7 +229,7 @@ def fit_logistic(X, y, l2=1.0, n_iter=50, tol=1e-10):
 
 def training_rows(external_games, stride=3, cfg=None):
     """(X, y) over the graded, live, ball-seen frames of the given ExternalGames (y = 1 for H)."""
-    from ._paths import ensure_repo_on_path
+    from .._paths import ensure_repo_on_path
     ensure_repo_on_path()
     import possession_metrics as pm
 

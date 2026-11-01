@@ -1,6 +1,6 @@
 """Score methods on the Metrica games with the official metric, and choose settings fairly.
 
-    from more_than_a_hack_2027 import eval_external as ee
+    from more_than_a_hack_2027.validation import harness as ee
     games = ee.load_games(variants=("clean", "degraded"))
     rows = ee.evaluate(games, {"baseline": ee.METHODS["baseline"], "v1": ee.METHODS["v1"]})
     print(ee.table(rows))
@@ -11,7 +11,7 @@
 This is the only place where variants are compared or settings chosen (docs/PLAN.md). The public
 5 minutes of BAR-ATH are a correctness alarm and never feed a decision.
 
-Scores here are relative: the labels are Metrica's event data turned into frames (external.py),
+Scores here are relative: the labels are Metrica's event data turned into frames (metrica.py),
 which is a different definition from the competition's corrected-tracking ownership, and
 "degraded" only approximates the ATD (degrade.py).
 """
@@ -21,9 +21,10 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from . import degrade as degrade_mod
-from . import external, pipeline
-from ._paths import ensure_repo_on_path
+from ..external import degrade as degrade_mod
+from ..external import metrica
+from .. import pipeline
+from .._paths import ensure_repo_on_path
 
 ensure_repo_on_path()
 import possession_metrics as pm  # noqa: E402
@@ -57,7 +58,7 @@ TRAINED = {"v2"}           # methods that need a per-held-out-game model
 def logo_models(games, train_variants=("degraded",), **train_kwargs):
     """{game: control model trained on every OTHER game}, so no game is scored by a model that
     saw it. Training uses the `train_variants` copies of the other games."""
-    from . import control
+    from ..stages import control
     ids = sorted({g for g, _ in games})
     models = {}
     for g in ids:
@@ -73,30 +74,30 @@ def _with_model(cfg, models, game):
     return dict(cfg or {}, model=models[game])
 
 
-def load_games(games=external.GAMES, variants=VARIANTS, degrade_cfg=None, missing_counts=None,
-               label_rules=external.LABEL_RULES):
+def load_games(games=metrica.GAMES, variants=VARIANTS, degrade_cfg=None, missing_counts=None,
+               label_rules=metrica.LABEL_RULES):
     """{(game, variant): ExternalGame}. Degraded games replay BAR-ATH's missing-player counts,
     read from the competition ATD unless `missing_counts` is given; without the data the
-    degraded variant keeps every player and says so. label_rules: external.LABEL_RULES or a
-    subset (external.labels_from_events), for checking a choice under another label rule."""
+    degraded variant keeps every player and says so. label_rules: metrica.LABEL_RULES or a
+    subset (metrica.labels_from_events), for checking a choice under another label rule."""
     if "degraded" in variants and missing_counts is None:
         missing_counts = _competition_missing_counts()
     out = {}
     for game in games:
-        clean = external.load_game(game, rules=label_rules)
+        clean = metrica.load_game(game, rules=label_rules)
         if "clean" in variants:
             out[(game, "clean")] = clean
         if "degraded" in variants:
             live = np.isin(clean.labels, (pm.H, pm.A))    # the same under every label rule
-            arrays = degrade_mod.degrade(external.load_arrays(game), missing_counts,
+            arrays = degrade_mod.degrade(metrica.load_arrays(game), missing_counts,
                                          degrade_cfg, game=game, live=live)
-            out[(game, "degraded")] = external.load_game(game, arrays=arrays, rules=label_rules)
+            out[(game, "degraded")] = metrica.load_game(game, arrays=arrays, rules=label_rules)
     return out
 
 
 def _competition_missing_counts():
     try:
-        from .context import load_context
+        from ..data.context import load_context
         return degrade_mod.atd_missing_counts(load_context())
     except (FileNotFoundError, OSError) as error:
         warnings.warn("competition ATD not available ({}); degraded games keep every player"

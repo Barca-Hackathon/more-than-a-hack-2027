@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import io_atd
-from ._paths import ensure_repo_on_path
+from . import atd
+from .._paths import ensure_repo_on_path
 
 ensure_repo_on_path()
 import games  # noqa: E402
@@ -65,7 +65,7 @@ class Context:
 def load_context(game=games.GAME, data_dir=None, source="tactical"):
     if source != "tactical":
         raise ValueError("the submission is indexed to the tactical recording only")
-    data = io_atd.load_cached(source, game, data_dir)
+    data = atd.load_cached(source, game, data_dir)
 
     halves = tuple(games.half_video_blocks(game))
     half_of_frame = np.zeros(data["n_frames"], dtype=np.int8)

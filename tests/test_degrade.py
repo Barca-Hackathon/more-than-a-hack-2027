@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from more_than_a_hack_2027 import degrade
+from more_than_a_hack_2027.external import degrade
 
 
 def arrays(n=600, per_team=11, seed=0):

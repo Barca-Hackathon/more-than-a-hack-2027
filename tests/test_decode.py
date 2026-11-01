@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from more_than_a_hack_2027 import decode
-from more_than_a_hack_2027.decode import A, D, H
+from more_than_a_hack_2027.stages import decode
+from more_than_a_hack_2027.stages.decode import A, D, H
 
 
 def evidence_for(states, strength=1.0, noise=0.0, seed=0):

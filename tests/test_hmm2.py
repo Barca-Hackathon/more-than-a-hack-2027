@@ -4,7 +4,7 @@ import itertools
 
 import numpy as np
 
-from more_than_a_hack_2027 import hmm2
+from more_than_a_hack_2027.stages import hmm2
 
 
 def brute_force(loglik, p01, p10, init1, clamp1=None):

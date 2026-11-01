@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from more_than_a_hack_2027.context import Context
+from more_than_a_hack_2027.data.context import Context
 
 PITCH = (105.0, 68.0)
 

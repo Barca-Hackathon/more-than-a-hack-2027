@@ -207,7 +207,7 @@ def fragment(xy, speed, team_of_slot):
 
 
 def degrade(arrays, missing_counts=None, cfg=None, game=0, live=None):
-    """A degraded copy of external.load_arrays() output. Deterministic for a given seed + game.
+    """A degraded copy of metrica.load_arrays() output. Deterministic for a given seed + game.
 
     missing_counts: the ATD's per-frame missing-player series (atd_missing_counts); it is replayed
     cyclically from a seeded offset. None skips player dropout.
