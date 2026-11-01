@@ -166,21 +166,21 @@ def _training_block(seed, n=300, extra=10):
     return X, sign, labels, np.ones(n, bool), ((1, 0, n // 2 - 1), (2, n // 2, n - 1))
 
 
-@pytest.mark.parametrize("with_aux", [False, True])
-def test_training_runs_with_and_without_an_auxiliary_dataset(with_aux, tmp_path, monkeypatch):
+@pytest.mark.parametrize("aux_head", [None, "own", "main"])
+def test_training_runs_with_and_without_an_auxiliary_dataset(aux_head, tmp_path, monkeypatch):
     pytest.importorskip("torch")
     from more_than_a_hack_2027.seq import training
 
     aux = ()
-    if with_aux:
+    if aux_head:
         monkeypatch.setattr(training, "CACHE_DIR", str(tmp_path))
         X, sign, labels, graded, halves = _training_block(1)
         np.savez(tmp_path / "aux.npz", X=X, swap_sign=sign, labels=labels, graded=graded,
                  halves=np.array(halves))
         aux = ("aux.npz",)
     cfg = {"channels": 8, "dilations": (1, 2), "steps": 2, "batch": 2, "crop": 100,
-           "threads": 1, "aux": aux}
+           "threads": 1, "aux": aux, "aux_head": aux_head or "own"}
     model = training.train([_training_block(0)], cfg, log=None)
-    assert model.arch["heads"] == (2 if with_aux else 1)
+    assert model.arch["heads"] == (2 if aux_head == "own" else 1)
     lp = model.forward(_training_block(2)[0])
     assert lp.shape == (300, 3) and np.isfinite(lp).all()

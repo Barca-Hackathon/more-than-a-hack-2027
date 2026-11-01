@@ -37,8 +37,10 @@ TRAIN_DEFAULTS = {
     "turn_frames": 12,
     "flip": False,          # also train on left-right mirrored copies, and average them at test
     "aux": (),              # cached input files (CACHE_DIR) of an auxiliary dataset, e.g. the
-                            # open DFL matches, learned through a second output head
+                            # open DFL matches
     "aux_p": 0.5,           # share of batch rows drawn from the auxiliary dataset
+    "aux_head": "own",      # "own": learned through a second output head; "main": the aux labels
+                            # are the same kind as the main ones, so they train the main head
 }
 CACHE_DIR = os.path.join(_paths.CACHE_DIR, "seq_inputs")
 
@@ -168,7 +170,9 @@ def train(blocks, cfg=None, log=print, meta=None):
 
     seqs = _sequences(blocks, cfg)
     aux = _sequences([load_cached(name) for name in cfg["aux"]], cfg) if cfg["aux"] else []
-    heads = 2 if aux else 1
+    if cfg["aux_head"] not in ("own", "main"):
+        raise ValueError("aux_head must be 'own' or 'main'")
+    heads = 2 if aux and cfg["aux_head"] == "own" else 1
     cin = seqs[0][0].shape[1]
     geo = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
     scale = np.ones(cin)
@@ -192,10 +196,10 @@ def train(blocks, cfg=None, log=print, meta=None):
     for step in range(int(cfg["steps"])):
         xb, yb, wb, hb = [], [], [], []
         for _ in range(int(cfg["batch"])):
-            head = int(bool(aux) and rng.rand() < cfg["aux_p"])
-            pool = pools[head]
-            x, y, w, sign = pool[rng.choice(len(pool), p=probs[head])]
-            hb.append(head)
+            k = int(bool(aux) and rng.rand() < cfg["aux_p"])
+            pool = pools[k]
+            x, y, w, sign = pool[rng.choice(len(pool), p=probs[k])]
+            hb.append(k if heads > 1 else 0)
             start = rng.randint(0, max(1, len(x) - crop))
             xs, ys, ws = x[start:start + crop], y[start:start + crop], w[start:start + crop]
             if sign is not None:
