@@ -197,6 +197,20 @@ def _cmd_train_seq(args):
     return 0
 
 
+def _cmd_dfl_inputs(args):
+    import warnings
+
+    from .external import dfl
+    from .validation import harness
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    missing = harness._competition_missing_counts()
+    for match_id in args.matches or dfl.MATCHES:
+        for seed in args.seeds:
+            print(dfl.build_inputs(match_id, seed, missing_counts=missing, labels=args.labels))
+    return 0
+
+
 def _cmd_tune_seq(args):
     import warnings
 
@@ -287,6 +301,14 @@ def build_parser():
                    help="degradation seeds")
     p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
     p.set_defaults(func=_cmd_train_seq)
+
+    p = sub.add_parser("dfl-inputs",
+                       help="download the open DFL matches and cache their sequence-model inputs")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1], help="degradation seeds")
+    p.add_argument("--labels", default="control", choices=("flag", "control"),
+                   help="DFL's per-touch flag, or the flag filtered by control events")
+    p.add_argument("--matches", nargs="+", default=None, help="default: all seven")
+    p.set_defaults(func=_cmd_dfl_inputs)
 
     p = sub.add_parser("tune-seq",
                        help="held-out decoder choice for v3 on the external games (torch)")

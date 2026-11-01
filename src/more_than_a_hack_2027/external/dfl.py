@@ -11,14 +11,26 @@ sequence-model inputs of each degraded copy in .cache/seq_inputs/.
 
 Labels. Each position frame carries DFL's ball status (alive / dead) and ball-possessing team.
 That possession flag changes on every touch (400-510 possessions per match, median 3-4 s, against
-~246 and ~9 s for the Metrica event-derived labels), so it is NOT the label the submission is
-scored on. It is used only through a second output head of the sequence model (training "aux"),
-so the shared network learns who touches the ball from seven more matches while the scored head
-is trained on the Metrica labels alone.
+~246 and ~9 s for the Metrica event-derived labels), so it is not the scored kind of label
+(labels="flag", files dfl_*). The "control" labels (files dflc_*) follow the Metrica rule
+instead -- possession changes when the other team GAINS control -- by filtering the flag with
+DFL's own event data: a change counts only if the new team has a control event of its own (a
+pass or cross, shot, ball claim, set piece, or a tackle won with the ball) within its flag spell,
++-1.5 s; otherwise the touch is given back to the team that had the ball. The flag keeps the
+frame-exact timing, the events only decide which changes count. This gives 214-272 possessions
+per match (median 9-11 s), like the Metrica labels.
+
+The raw event times are logged live and run up to ~2 s off the tracking clock, so each half's
+offset is fitted first: the one (-2 s ... +2 s) that puts the tracked ball closest to the event
+positions of passes, shots and other ball actions (median 4-6 m at the best offset).
 """
 
+import datetime
+import json
 import os
+import re
 import urllib.request
+import xml.etree.ElementTree as ET
 
 import numpy as np
 
@@ -29,6 +41,14 @@ RAW_DIR = os.path.join(OTHER_MATCHES_DIR, "dfl")
 ARRAY_DIR = os.path.join(CACHE_DIR, "dfl")
 PITCH = (105.0, 68.0)
 FILES = {"meta": "{}_matchinfo.xml", "tracking": "{}_positions.xml", "event": "{}_events.xml"}
+FPS = 25
+FIRST_FRAMES = (10000, 100000)          # DFL frame number of the first frame of each half
+SET_PIECES = {"KickOff", "ThrowIn", "FreeKick", "CornerKick", "GoalKick", "Penalty"}
+CONTROL_EVENTS = {"Play", "ShotAtGoal", "BallClaiming"} | SET_PIECES
+LOCATED_EVENTS = ("Play", "ShotAtGoal", "OtherBallAction")     # used to fit the clock offset
+CONTROL_TOL_FRAMES = 38                 # 1.5 s either side of a flag spell
+SYNC_OFFSETS_S = np.arange(-2.0, 2.01, 0.04)
+LABEL_KINDS = {"flag": "dfl", "control": "dflc"}
 
 
 def raw_path(match_id, kind):
@@ -119,31 +139,172 @@ def arrays_and_labels(match_id):
     return arrays, labels
 
 
-def input_file(match_id, seed):
-    """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux"."""
-    return "dfl_{}_s{}.npz".format(match_id, seed)
+def _timestamp(text):
+    return datetime.datetime.fromisoformat(text).timestamp()
 
 
-def build_inputs(match_id, seed, missing_counts=None):
-    """Degrade one match like the external games and cache network inputs + labels."""
+def first_frame_times(match_id):
+    """{DFL frame number: wall-clock time (s)} for the first frame of each half, read from the
+    positions XML once and cached."""
+    path = os.path.join(ARRAY_DIR, match_id + "_t0.json")
+    if os.path.exists(path):
+        with open(path) as handle:
+            return {int(k): v for k, v in json.load(handle).items()}
+    patterns = {n: re.compile(rb'N="%d" T="([^"]+)"' % n) for n in FIRST_FRAMES}
+    found, tail = {}, b""
+    with open(raw_path(match_id, "tracking"), "rb") as handle:
+        while len(found) < len(patterns):
+            chunk = handle.read(1 << 24)
+            if not chunk:
+                raise ValueError("{}: first frames {} not found".format(
+                    match_id, sorted(set(patterns) - set(found))))
+            buf = tail + chunk
+            for n, pattern in patterns.items():
+                m = pattern.search(buf) if n not in found else None
+                if m:
+                    found[n] = _timestamp(m.group(1).decode())
+            tail = buf[-256:]
+    os.makedirs(ARRAY_DIR, exist_ok=True)
+    with open(path, "w") as handle:
+        json.dump(found, handle)
+    return found
+
+
+def frame_times(match_id, frame_id, period):
+    """Wall-clock time (s) of every frame."""
+    t0 = first_frame_times(match_id)
+    base = np.where(period == 1, FIRST_FRAMES[0], FIRST_FRAMES[1])
+    return np.array([t0[b] for b in base]) + (frame_id - base) / FPS
+
+
+def home_team_id(match_id):
+    return ET.parse(raw_path(match_id, "meta")).getroot().find(".//General").get("HomeTeamId")
+
+
+def events(match_id):
+    """[(time s, tag, acting team id or None, x, y, attributes)] in file order. The acting team
+    of a tackle is its winner; of a set piece, the team of the play inside it."""
+    out = []
+    for event in ET.parse(raw_path(match_id, "event")).getroot():
+        t = _timestamp(event.get("EventTime"))
+        x, y = event.get("X-Position"), event.get("Y-Position")
+        x = float(x) if x else np.nan
+        y = float(y) if y else np.nan
+        for child in event:
+            team = child.get("Team") or child.get("WinnerTeam")
+            if child.tag in SET_PIECES:
+                inner = next(iter(child), None)
+                if inner is not None:
+                    team = team or inner.get("Team")
+            out.append((t, child.tag, team, x, y, dict(child.attrib)))
+    return out
+
+
+def is_control_event(tag, attrs):
+    return tag in CONTROL_EVENTS or (tag == "TacklingGame"
+                                     and attrs.get("WinnerRole") == "withBallControl")
+
+
+def clock_offset(ball, ftime, evs):
+    """The event-clock offset (s) of one half: the one that puts the ball closest (median) to
+    the located events. ball (n, 2+) and ftime (n,) are that half's frames."""
+    located = [e for e in evs if e[1] in LOCATED_EVENTS and np.isfinite(e[3])
+               and ftime[0] - 5 <= e[0] <= ftime[-1] + 5]
+    times = np.array([e[0] for e in located])
+    xy = np.array([(e[3], PITCH[1] - e[4]) for e in located])    # DFL's y runs the other way
+    best = None
+    for offset in SYNC_OFFSETS_S:
+        idx = np.round((times + offset - ftime[0]) / 0.04).astype(int)
+        ok = (idx >= 0) & (idx < len(ftime))
+        b = ball[idx[ok]]
+        d = np.nanmedian(np.hypot(b[:, 0] - xy[ok, 0], b[:, 1] - xy[ok, 1]))
+        if best is None or d < best[0]:
+            best = (d, offset)
+    return best[1], best[0]
+
+
+def _runs(codes):
+    change = np.flatnonzero(np.diff(codes) != 0) + 1
+    starts, stops = np.r_[0, change], np.r_[change, len(codes)]
+    return [(a, b, codes[a]) for a, b in zip(starts, stops)]
+
+
+def filter_switches(flag, event_frames, event_teams, tol=CONTROL_TOL_FRAMES):
+    """Control-filtered labels from per-frame flag codes (0/1 team, 2 dead): a flag spell of a
+    team with no control event of its own within [start - tol, stop + tol) is given to the team
+    whose spell it interrupts (the preceding one, in the same stretch of live play).
+
+    event_frames must be sorted; event_teams are their team codes."""
+    event_frames, event_teams = np.asarray(event_frames), np.asarray(event_teams)
+    out = np.asarray(flag).copy()
+    prev, prev_end = None, -1
+    for a, b, team in _runs(np.asarray(flag)):
+        if team == 2:
+            prev, prev_end = None, b
+            continue
+        lo, hi = np.searchsorted(event_frames, a - tol), np.searchsorted(event_frames, b + tol)
+        own = bool((event_teams[lo:hi] == team).any())
+        if not own and prev is not None and prev_end == a:
+            out[a:b] = prev
+        else:
+            prev = out[a]
+        prev_end = b
+    return out
+
+
+def control_labels(match_id, log=None):
+    """H/A/D codes (0/1/2) per frame: the flag filtered by DFL's control events."""
+    z = load_arrays(match_id)
+    period, alive, owner = z["period"].astype(int), z["alive"], z["owner"].astype(int)
+    ftime = frame_times(match_id, z["frame_id"], period)
+    home = home_team_id(match_id)
+    evs = events(match_id)
+    marks = []
+    for half in (1, 2):
+        rows = np.flatnonzero(period == half)
+        offset, dist = clock_offset(z["ball"][rows], ftime[rows], evs)
+        if log:
+            log("{} half {}: event clock offset {:+.2f} s, median ball distance {:.1f} m".format(
+                match_id, half, offset, dist))
+        start, stop = ftime[rows[0]], ftime[rows[-1]]
+        for t, tag, team, _, _, attrs in evs:
+            if team is None or not start - 5 <= t <= stop + 5 or not is_control_event(tag, attrs):
+                continue
+            i = int(round((t + offset - start) / 0.04))
+            marks.append((rows[0] + min(max(i, 0), len(rows) - 1), 0 if team == home else 1))
+    marks.sort()
+    flag = np.where(alive & (owner >= 0), owner, 2)
+    return filter_switches(flag, [f for f, _ in marks], [k for _, k in marks]).astype(np.int8)
+
+
+def input_file(match_id, seed, labels="flag"):
+    """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux":
+    dfl_* (flag labels) or dflc_* (control labels)."""
+    return "{}_{}_s{}.npz".format(LABEL_KINDS[labels], match_id, seed)
+
+
+def build_inputs(match_id, seed, missing_counts=None, labels="flag"):
+    """Degrade one match like the external games and cache network inputs + labels
+    (labels: "flag" or "control", see the module docstring)."""
     from . import degrade, metrica
     from ..validation import harness
     from ..seq import network
     from ..seq.training import CACHE_DIR as INPUT_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    path = os.path.join(INPUT_DIR, input_file(match_id, seed))
+    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels))
     if os.path.exists(path):
         return path
     if missing_counts is None:
         missing_counts = harness._competition_missing_counts()
-    arrays, labels = arrays_and_labels(match_id)
+    arrays, flag = arrays_and_labels(match_id)
     game = 100 + MATCHES.index(match_id)
     degraded = degrade.degrade(arrays, missing_counts, {"seed": seed}, game=game,
-                               live=labels < 2)
+                               live=flag < 2)
     ctx = metrica.make_context(game, degraded)
     graded = ctx.half_of_frame > 0
-    labels = np.where(graded, labels, 3).astype(np.int8)
+    codes = flag if labels == "flag" else control_labels(match_id)
+    labels = np.where(graded, codes, 3).astype(np.int8)
     X, swap_sign = network.inputs(ctx)
     np.savez(path, X=X, swap_sign=swap_sign, labels=labels, graded=graded,
              halves=np.array(ctx.halves))
