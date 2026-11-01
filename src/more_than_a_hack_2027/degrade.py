@@ -20,6 +20,19 @@ truth. What was measured, BAR-ATH graded frames vs the three Metrica games:
                         track fragment as in the ATD, not a player.
   player smoothness     player |accel| p50 1.1 m/s^2 vs 1.4-1.8: Metrica is already the noisier
                         one, so player positions are left as they are.
+  ball, in live play    6.7% of the frames v2 calls live have no ball (Nov 1, 50.7 live
+                        minutes)  |  0.5-1.2% in Metrica, almost all 2-3 frame flickers. BAR-ATH's
+                        come in three kinds, replayed by live_gaps() (LIVE_GAPS):
+                          - inside live play, 10 losses of 5.3-11.2 s (and 13 flickers under
+                            0.5 s, which Metrica already has);
+                          - before a stoppage: 38 of 143 stoppages lose the ball first, 24 of
+                            them within 1.4 s and the rest 2.6-9.7 s;
+                          - after a restart: 8 of 143 restarts pick it up 2.1-10.9 s late.
+                        These are measured against v2's own live/dead calls, so they are GT-free;
+                        "before a stoppage" also holds some of v2's own late stop calls.
+                        Placing them needs to know where play is live on the Metrica game, which
+                        only its labels tell: degrade(live=...) takes that mask from the labels.
+                        Gaps only hide the ball; they never add information.
 
 The missing-count series is read from the competition ATD at run time (it is match-derived, so it
 is never written into the repository). Without the data, tests pass their own series.
@@ -37,6 +50,20 @@ DEGRADE_DEFAULTS = {
     "priority_renewal_s": 35.0,
     "fragment": True,
     "full_squad": 22,
+    "live_gaps": True,          # hide the ball in live play as BAR-ATH does (needs live=)
+    "live_gap_params": None,    # overrides of LIVE_GAPS, for experiments
+}
+
+# Rounded summaries of the BAR-ATH measurement in the module docstring.
+LIVE_GAPS = {
+    "interior_per_live_min": 0.20,      # 10 in 50.7 live minutes
+    "interior_s": (5.0, 11.0),
+    "before_stop_p": 0.27,              # 38 / 143
+    "before_stop_short_p": 0.63,        # 24 / 38
+    "before_stop_short_s": (0.04, 1.4),
+    "before_stop_long_s": (2.5, 10.0),
+    "after_restart_p": 0.056,           # 8 / 143
+    "after_restart_s": (2.0, 11.0),
 }
 
 
@@ -77,6 +104,38 @@ def gaussian_smooth(values, sigma):
         for c in range(values.shape[1]):
             out[a:b, c] = np.convolve(padded[:, c], kernel, mode="valid")
     return out
+
+
+def live_gaps(live, rng, fps=25, params=None):
+    """(n,) bool: frames whose ball to hide, given the (n,) bool mask of live play.
+
+    Per live run, in this order: a Poisson number of losses strictly inside it, then possibly
+    one that ends at its stoppage, then possibly one that starts at its restart. A run that
+    starts at frame 0 has no restart, and one that ends at the last frame has no stoppage.
+    """
+    params = dict(LIVE_GAPS, **(params or {}))
+    live = np.asarray(live, dtype=bool)
+    n = len(live)
+    hide = np.zeros(n, dtype=bool)
+
+    def frames(bounds):
+        return max(1, int(round(rng.uniform(*bounds) * fps)))
+
+    for a, b in _runs(live):
+        a, b = int(a), int(b)
+        for _ in range(rng.poisson(params["interior_per_live_min"] * (b - a) / (fps * 60.0))):
+            m = frames(params["interior_s"])
+            if b - a - m - 2 > 0:                       # seen on both sides
+                start = a + 1 + rng.randint(b - a - m - 1)
+                hide[start:start + m] = True
+        if b < n and rng.uniform() < params["before_stop_p"]:
+            short = rng.uniform() < params["before_stop_short_p"]
+            m = frames(params["before_stop_short_s" if short else "before_stop_long_s"])
+            hide[max(a, b - m):b] = True
+        if a > 0 and rng.uniform() < params["after_restart_p"]:
+            m = frames(params["after_restart_s"])
+            hide[a:min(b, a + m)] = True
+    return hide
 
 
 def atd_missing_counts(ctx):
@@ -147,17 +206,24 @@ def fragment(xy, speed, team_of_slot):
             np.concatenate(new_team))
 
 
-def degrade(arrays, missing_counts=None, cfg=None, game=0):
+def degrade(arrays, missing_counts=None, cfg=None, game=0, live=None):
     """A degraded copy of external.load_arrays() output. Deterministic for a given seed + game.
 
     missing_counts: the ATD's per-frame missing-player series (atd_missing_counts); it is replayed
     cyclically from a seeded offset. None skips player dropout.
+    live: (n,) bool, where play is live (from the game's labels); None skips the live-play ball
+    gaps. They draw from their own random stream, so switching them off leaves every other
+    degradation identical and on/off comparisons are paired.
     """
     cfg = dict(DEGRADE_DEFAULTS, **(cfg or {}))
     rng = np.random.RandomState(int(cfg["seed"]) * 1000 + int(game))
     out = dict(arrays)
 
     ball = np.asarray(arrays["ball"], dtype=np.float64)
+    if cfg["live_gaps"] and live is not None:
+        gap_rng = np.random.RandomState([int(cfg["seed"]), int(game), 1])
+        ball = ball.copy()
+        ball[live_gaps(live, gap_rng, params=cfg["live_gap_params"])] = np.nan
     noisy = ball + rng.normal(0.0, cfg["ball_noise_m"], size=ball.shape)
     out["ball"] = gaussian_smooth(noisy, cfg["ball_sigma_frames"])
 
@@ -175,7 +241,7 @@ def degrade(arrays, missing_counts=None, cfg=None, game=0):
     return out
 
 
-def describe(arrays, graded):
+def describe(arrays, graded, live=None):
     """The input statistics the calibration targets, for a before/after printout."""
     ball = np.where(graded[:, None], np.asarray(arrays["ball"]), np.nan)
     v = np.diff(ball, axis=0) * 25
@@ -190,6 +256,8 @@ def describe(arrays, graded):
         "ball_accel_autocorr_1": autocorr(1),
         "ball_accel_autocorr_5": autocorr(5),
         "ball_accel_p50_p90_p99": [float(x) for x in np.nanpercentile(accel, [50, 90, 99])],
+        "ball_missing_live": (float(np.isnan(np.asarray(arrays["ball"])[live, 0]).mean())
+                              if live is not None else None),
         "players_per_frame": float(observed.mean()),
         "n_slots": int(np.asarray(arrays["team_of_slot"]).shape[0]),
     }

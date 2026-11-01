@@ -65,3 +65,45 @@ def test_degrade_is_deterministic_and_seeded():
     assert np.array_equal(first["ball"], second["ball"], equal_nan=True)
     assert not np.array_equal(first["ball"], other["ball"], equal_nan=True)
     assert np.isnan(first["ball"][200:260]).all()
+
+
+def _live_mask():
+    live = np.zeros(30000, dtype=bool)
+    for a, b in ((100, 9000), (9500, 20000), (20400, 29990)):     # three live runs
+        live[a:b] = True
+    return live
+
+
+def test_live_gaps_stay_inside_live_play_and_hit_the_target_kinds():
+    live = _live_mask()
+    hide = degrade.live_gaps(live, np.random.RandomState(0),
+                             params={"interior_per_live_min": 2.0, "before_stop_p": 1.0,
+                                     "after_restart_p": 1.0})
+    assert not (hide & ~live).any()                       # never outside live play
+    for a, b in ((100, 9000), (9500, 20000), (20400, 29990)):
+        assert hide[b - 1] and hide[a]                   # every run: lost before the stop ...
+    assert hide[1000:8000].any()                         # ... after the restart, and inside
+
+
+def test_live_gaps_can_be_switched_off_per_kind():
+    live = _live_mask()
+    none = degrade.live_gaps(live, np.random.RandomState(0),
+                             params={"interior_per_live_min": 0.0, "before_stop_p": 0.0,
+                                     "after_restart_p": 0.0})
+    assert not none.any()
+
+
+def test_live_gaps_leave_every_other_degradation_unchanged():
+    data = arrays()
+    counts = np.random.RandomState(3).randint(0, 4, size=1000).astype(np.int16)
+    live = np.zeros(len(data["ball"]), dtype=bool)
+    live[20:180] = live[300:580] = True
+    params = {"interior_per_live_min": 30.0, "interior_s": (0.4, 1.0)}
+    on = degrade.degrade(data, counts, {"live_gap_params": params}, game=1, live=live)
+    off = degrade.degrade(data, counts, {"live_gaps": False}, game=1, live=live)
+    assert np.array_equal(on["xy"], off["xy"], equal_nan=True)
+    hidden = np.isnan(on["ball"][:, 0]) & ~np.isnan(off["ball"][:, 0])
+    assert hidden.any() and not (hidden & ~live).any()
+    assert not (~np.isnan(on["ball"][:, 0]) & np.isnan(off["ball"][:, 0])).any()
+    again = degrade.degrade(data, counts, {"live_gap_params": params}, game=1, live=live)
+    assert np.array_equal(on["ball"], again["ball"], equal_nan=True)

@@ -87,8 +87,9 @@ def load_games(games=external.GAMES, variants=VARIANTS, degrade_cfg=None, missin
         if "clean" in variants:
             out[(game, "clean")] = clean
         if "degraded" in variants:
+            live = np.isin(clean.labels, (pm.H, pm.A))    # the same under every label rule
             arrays = degrade_mod.degrade(external.load_arrays(game), missing_counts,
-                                         degrade_cfg, game=game)
+                                         degrade_cfg, game=game, live=live)
             out[(game, "degraded")] = external.load_game(game, arrays=arrays, rules=label_rules)
     return out
 
