@@ -133,18 +133,19 @@ def _weights(y, cfg, fps=25):
 
 
 def _sequences(blocks, cfg):
-    """[(X half, y half, w half)] for every game copy and its team swap; y = -100 where unscored."""
+    """[(X half, y half, w half, swap)] for every game copy and its team swap; y = -100 where
+    unscored. The swapped copy shares X and is swapped crop by crop (swap = its swap_sign), which
+    halves the memory and gives the same numbers."""
     seqs = []
     for X, swap_sign, labels, graded, halves in blocks:
         y = np.where(graded & (labels < 3), labels, -100).astype(np.int64)
         ys = y.copy()
         ys[y == 0], ys[y == 1] = 1, 0
-        Xs = network.swap(X, swap_sign)
         for _, first, last in halves:
             part = slice(first, last + 1)
             w = _weights(y[part], cfg)
-            seqs.append((X[part], y[part], w))
-            seqs.append((Xs[part], ys[part], w))
+            seqs.append((X[part], y[part], w, None))
+            seqs.append((X[part], ys[part], w, swap_sign))
     return seqs
 
 
@@ -171,7 +172,7 @@ def train(blocks, cfg=None, log=print, meta=None):
     cin = seqs[0][0].shape[1]
     geo = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
     scale = np.ones(cin)
-    rest = np.concatenate([x[:, geo:] for x, _, _ in seqs[::2]]).astype(np.float64)
+    rest = np.concatenate([x[:, geo:] for x, _, _, _ in seqs[::2]]).astype(np.float64)
     scale[geo:] = np.sqrt((rest ** 2).mean(axis=0)) + 1e-3
     del rest
     scale32 = scale.astype(np.float32)
@@ -183,7 +184,7 @@ def train(blocks, cfg=None, log=print, meta=None):
     pools = [seqs] + ([aux] if aux else [])
     probs = []
     for pool in pools:
-        lengths = np.array([len(x) for x, _, _ in pool], dtype=np.float64)
+        lengths = np.array([len(x) for x, _, _, _ in pool], dtype=np.float64)
         probs.append(lengths / lengths.sum())
     crop = int(cfg["crop"])
     mirror = _mirror(cfg, cin)
@@ -193,10 +194,12 @@ def train(blocks, cfg=None, log=print, meta=None):
         for _ in range(int(cfg["batch"])):
             head = int(bool(aux) and rng.rand() < cfg["aux_p"])
             pool = pools[head]
-            x, y, w = pool[rng.choice(len(pool), p=probs[head])]
+            x, y, w, sign = pool[rng.choice(len(pool), p=probs[head])]
             hb.append(head)
             start = rng.randint(0, max(1, len(x) - crop))
             xs, ys, ws = x[start:start + crop], y[start:start + crop], w[start:start + crop]
+            if sign is not None:
+                xs = network.swap(xs, sign)
             if mirror is not None and rng.rand() < 0.5:
                 xs = xs * mirror
             if len(xs) < crop:
