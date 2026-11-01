@@ -26,6 +26,19 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.2.0",
 ]
+# Training the v3 sequence model only (seqtrain.py); prediction needs numpy alone.
+#   uv run --group train more-than-a-hack-2027 train-seq
+train = [
+    "torch>=2.15.0",
+]
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

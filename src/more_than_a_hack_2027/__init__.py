@@ -2,7 +2,7 @@
 
 Layout:
     cli.py          the `more-than-a-hack-2027` command
-    pipeline.py     the methods (v0 baseline ... v2): match -> frame labels
+    pipeline.py     the methods (v0 baseline ... v3 sequence model): match -> frame labels
     submission.py   write the submission CSV and check it with the official validation
     _paths.py       repository locations; access to the organiser modules
     models/         shipped model weights (JSON)
@@ -12,4 +12,5 @@ Layout:
     external/       other matches (Metrica) and the degradation that makes them look like
                     the competition data
     validation/     held-out scoring on the other matches: harness, decoder tuning, ablation
+    seq/            v3: the temporal CNN (inputs + numpy network, torch training, tuning)
 """
