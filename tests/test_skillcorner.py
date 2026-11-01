@@ -40,3 +40,24 @@ def test_pitch_frame_moves_the_origin_to_the_top_left_corner_with_y_down():
     np.testing.assert_allclose(y, [34.0, 0.0, 68.0])
     x, _ = sc.to_pitch([50.0], [0.0], 100.0, 64.0)  # scaled from the match's own pitch size
     np.testing.assert_allclose(x, [105.0])
+
+
+def test_consecutive_phases_of_one_team_make_one_spell_unless_the_ball_died_between():
+    phases = [(10, 20, 7), (20, 30, 7), (30, 35, 9), (50, 60, 9)]
+    assert sc.team_spells(phases) == [(10, 30, 7), (30, 35, 9), (50, 60, 9)]
+
+
+def test_a_single_first_time_touch_after_the_other_team_is_not_a_possession():
+    phases = [(10, 30, 7), (30, 34, 9), (34, 50, 7)]
+    touches = [(12, 20, 7), (30, 30, 9), (34, 40, 7)]
+    assert sc.control_spells(phases, touches) == [(10, 50, 7)]
+
+
+def test_a_controlled_touch_or_two_touches_or_a_restart_still_count():
+    phases = [(10, 30, 7), (30, 34, 9), (34, 50, 7)]
+    held = [(12, 20, 7), (30, 33, 9), (34, 40, 7)]               # the ball was kept 0.3 s
+    assert sc.control_spells(phases, held) == sc.team_spells(phases)
+    two = [(12, 20, 7), (30, 30, 9), (31, 31, 9), (34, 40, 7)]   # a first-time pass to a mate
+    assert sc.control_spells(phases, two) == sc.team_spells(phases)
+    after_dead = [(10, 30, 7), (40, 44, 9)]                      # first touch after a stoppage
+    assert sc.control_spells(after_dead, [(40, 40, 9)]) == after_dead

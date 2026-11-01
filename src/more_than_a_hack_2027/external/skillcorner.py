@@ -13,7 +13,10 @@ there (never deleted; data/ is never committed). Parsed 25 Hz arrays are cached 
 Labels. A phase of play is a stretch of live ball with one team in possession, so the ball is
 dead between phases and a possession is a run of consecutive phases of one team. That gives
 ~280 possessions per match with a ~6 s median, near the ~246 and ~9 s of the Metrica
-event-derived labels (more short contested spells: SkillCorner's "chaotic" phases).
+event-derived labels (more short contested spells: SkillCorner's "chaotic" phases). Those are
+labels="phase" (files sc_*). labels="control" (files scc_*) applies the Metrica one-touch rule on
+top: a spell that is a single zero-length touch straight after the other team's spell (a
+first-time clearance, a deflection) is not a possession, ~20-35 per match.
 
 Resampling. The 10 Hz positions are interpolated linearly to the 25 Hz the pipeline assumes,
 inside each period; a gap stays a gap. Labels take the phase of the nearest 10 Hz frame.
@@ -39,6 +42,7 @@ SOURCE_FPS = 10
 FPS = 25
 PITCH = (105.0, 68.0)
 GAME_OFFSET = 200          # Context game numbers 200, 201, ... (Metrica 1-3, DFL 100+)
+LABEL_KINDS = {"phase": "sc", "control": "scc"}
 UNTRACKED = 3              # label code of frames with no tracked player (possession_metrics X)
 
 
@@ -165,11 +169,50 @@ def read_phases(match_id):
                     ph.team_in_possession_id.astype(int)))
 
 
-def arrays_and_labels(match_id):
+def read_touches(match_id):
+    """[(frame_start, frame_end, team_id)] of SkillCorner's player possessions."""
+    import pandas as pd
+    de = pd.read_csv(raw_path(match_id, "events"), low_memory=False)
+    pp = de[de.event_type == "player_possession"]
+    return list(zip(pp.frame_start.astype(int), pp.frame_end.astype(int), pp.team_id.astype(int)))
+
+
+def team_spells(phases):
+    """[(start, end, team)]: consecutive phases of one team with no dead ball between, merged."""
+    spells = []
+    for start, end, team in sorted(phases):
+        if spells and spells[-1][2] == team and start - spells[-1][1] <= 1:
+            spells[-1][1] = end
+        else:
+            spells.append([start, end, team])
+    return [tuple(x) for x in spells]
+
+
+def control_spells(phases, touches):
+    """team_spells under the Metrica one-touch rule: a spell straight after the other team's,
+    made of a single touch of zero duration (a first-time clearance, a deflection, a first-time
+    pass to nobody), is not a possession; its frames stay with the team that had the ball."""
+    out = []
+    for start, end, team in team_spells(phases):
+        own = [(a, b) for a, b, t in touches if t == team and start <= a < end]
+        one_touch = len(own) == 1 and own[0][0] == own[0][1]
+        if out and one_touch and out[-1][2] != team and start - out[-1][1] <= 1:
+            team = out[-1][2]
+        if out and out[-1][2] == team and start - out[-1][1] <= 1:
+            out[-1] = (out[-1][0], end, team)
+        else:
+            out.append((start, end, team))
+    return out
+
+
+def arrays_and_labels(match_id, labels="phase"):
     """(metrica.load_arrays-style dict at 25 Hz, H/A/D codes from the phases of play; X where
-    nobody is tracked)."""
+    nobody is tracked). labels: "phase" or "control" (control_spells)."""
     z = load_source(match_id)
-    codes10 = phase_labels(z["frame"], read_phases(match_id), int(z["home_id"]))
+    spells = read_phases(match_id)
+    if labels == "control":
+        spells = control_spells(spells, read_touches(match_id))
+    codes10 = phase_labels(z["frame"], spells, int(z["home_id"]))
     parts = {"xy": [], "ball": [], "period": [], "labels": []}
     for p in np.unique(z["period"]):
         rows = np.flatnonzero(z["period"] == p)
@@ -205,12 +248,13 @@ def arrays_and_labels(match_id):
     return arrays, labels
 
 
-def input_file(match_id, seed):
-    """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux"."""
-    return "sc_{}_s{}.npz".format(match_id, seed)
+def input_file(match_id, seed, labels="phase"):
+    """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux":
+    sc_* (phase labels) or scc_* (control labels)."""
+    return "{}_{}_s{}.npz".format(LABEL_KINDS[labels], match_id, seed)
 
 
-def build_inputs(match_id, seed, missing_counts=None):
+def build_inputs(match_id, seed, missing_counts=None, labels="phase"):
     """Degrade one match like the external games and cache network inputs + labels."""
     from . import degrade, metrica
     from ..validation import harness
@@ -218,12 +262,12 @@ def build_inputs(match_id, seed, missing_counts=None):
     from ..seq.training import CACHE_DIR as INPUT_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    path = os.path.join(INPUT_DIR, input_file(match_id, seed))
+    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels))
     if os.path.exists(path):
         return path
     if missing_counts is None:
         missing_counts = harness._competition_missing_counts()
-    arrays, codes = arrays_and_labels(match_id)
+    arrays, codes = arrays_and_labels(match_id, labels)
     game = GAME_OFFSET + match_ids().index(match_id)
     degraded = degrade.degrade(arrays, missing_counts, {"seed": seed}, game=game,
                                live=codes < 2)

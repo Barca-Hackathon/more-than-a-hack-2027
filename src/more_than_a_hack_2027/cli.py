@@ -221,7 +221,8 @@ def _cmd_skillcorner_inputs(args):
     missing = harness._competition_missing_counts()
     for match_id in args.matches or skillcorner.match_ids():
         for seed in args.seeds:
-            print(skillcorner.build_inputs(match_id, seed, missing_counts=missing), flush=True)
+            print(skillcorner.build_inputs(match_id, seed, missing_counts=missing,
+                                           labels=args.labels), flush=True)
     return 0
 
 
@@ -328,6 +329,8 @@ def build_parser():
                        help="download the SkillCorner open matches and cache their "
                             "sequence-model inputs")
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1], help="degradation seeds")
+    p.add_argument("--labels", default="phase", choices=("phase", "control"),
+                   help="SkillCorner's phases of play, or with the one-touch rule on top")
     p.add_argument("--matches", nargs="+", type=int, default=None, help="default: all twenty")
     p.set_defaults(func=_cmd_skillcorner_inputs)
 
