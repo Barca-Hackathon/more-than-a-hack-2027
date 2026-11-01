@@ -277,7 +277,7 @@ Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with th
   - Ball: 0.5 m white noise, then a Gaussian smoother (σ = 7 frames), both picked by a grid fit to the ATD statistics above. Each visible run is padded by linear extrapolation first, so a ball that crosses a line and disappears is not smoothed back inside (that had cut detected outs from 77 to 16).
   - Players: the ATD's own per-frame missing-player count is replayed from a seeded offset; who is missing follows a per-player priority redrawn every ~35 s (the ATD's median track run). The series is read from the ATD at run time, never stored in the repo.
   - Known residuals: smoothed peak ball speed is lower (p99 19 vs 25 m/s), and Metrica's ball is almost never seen while dead (0.5–15%, the ATD's EM estimate is 27%).
-- **Protocol** (`eval_external`). `evaluate()` scores any method with the official `possession_metrics.evaluate`. `logo_search()` does leave-one-game-out selection: for each held-out game it picks the config with the best mean spellF1 (macroF1 tie-break) on the other two, and reports the held-out score. Every hyperparameter choice is made here. Use the harness for relative decisions: event-derived labels are not Metrica's corrected-tracking ownership.
+- **Protocol** (`validation/harness.py`). `evaluate()` scores any method with the official `possession_metrics.evaluate`. `logo_search()` does leave-one-game-out selection: for each held-out game it picks the config with the best mean spellF1 (macroF1 tie-break) on the other two, and reports the held-out score. Every hyperparameter choice is made here. Use the harness for relative decisions: event-derived labels are not Metrica's corrected-tracking ownership.
 - **Public 5 min.** Run `evaluation/run_evaluation.py` at milestones as a correctness alarm only, and log the result. Never pick a variant on it.
 
 ### First results (Oct 31, seed 0; untuned v1; old labels, superseded)
@@ -365,9 +365,9 @@ Nothing was removed. Every component either helps or is within noise.
 | who | owns | next deliverable |
 |---|---|---|
 | **P1 Platform & decoder** | platform, `stages/decode.py`, final assembly, reproducibility | H/A duration priors (HSMM); event-snapping hooks |
-| **P2 Dead ball** | `io_tagging`, `ball` (cleaning), `deadball`, `hmm2`, `restart` | Anchors + EM HMM + refined stoppages + restart team |
-| **P3 Ball & control** | `ball` (touches, aerial), `control` | H↔A boundary timing: touch events, snapping boundaries (2–8 s possessions) |
-| **P4 External validation** | `external`, `degrade`, `eval_external`, `tune`; the hyperparameter search | P2 thresholds + stop/restart penalties via the `validation/tune.py` pattern; live-play ball dropout in `external/degrade.py` |
+| **P2 Dead ball** | `data/tagging`, `stages/ball` (cleaning), `stages/deadball`, `stages/hmm2`, `stages/restart` | Anchors + EM HMM + refined stoppages + restart team |
+| **P3 Ball & control** | `stages/ball` (touches, aerial), `stages/control` | H↔A boundary timing: touch events, snapping boundaries (2–8 s possessions) |
+| **P4 External validation** | `external/metrica`, `external/degrade`, `validation/harness`, `validation/tune`; the hyperparameter search | P2 thresholds + stop/restart penalties via the `validation/tune.py` pattern; live-play ball dropout in `external/degrade.py` |
 | **P5 Ball-free + stretch** | `shape`, `tag_prior`; stretch | Pseudo-label set + shape classifier (critical: the ball is missing in long blocks) |
 
 Everyone writes the tech-doc section for their own module. P1 compiles it.
