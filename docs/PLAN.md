@@ -253,7 +253,7 @@ Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with th
 - **Data.** Metrica's public sample data (github.com/metrica-sports/sample-data); their README asks that public use acknowledges the source, so the tech doc must.
   - Games 1 and 2: CSV tracking (one file per team) plus `RawEventsData.csv`.
   - Game 3: EPTS tracking plus JSON events. The player order changes at every substitution (11 format specs), so `external.py` gives every player one fixed slot.
-  - All 25 fps, 105 × 68 m. `external.py` downloads them into `.cache/external/` on first use (gitignored, never committed) and caches the parsed arrays (~3 s for all three).
+  - All 25 fps, 105 × 68 m. `external.py` downloads them once into `data/other_matches/metrica/` and keeps them there (never deleted; `data/` is never committed), and caches the parsed arrays in `.cache/external/` (~3 s for all three).
 - **Labels** (`external.labels_from_events`). Events are converted to frame-level H/A/D. The tech doc must say these come from Metrica analysts' event data, cover 3 games, and are not the provided game.
   - Stops: `BALL OUT` and shots that go out or in (end frame), fouls (`FAULT RECEIVED`, `CHALLENGE …-FAULT-…` without advantage), offside and hand ball, end of half.
   - The ball stays dead until the next **tagged** restart: a `SET PIECE` not marked RETAKEN, or a goal kick. Between a whistle and the restart the stream often has 1–3 "after the whistle" actions within ~3 s at walking pace (a ball kicked away, a shot after the flag), so those do not restart play. A few restarts are never tagged; that shows as ≥ 3 play events spanning ≥ 5 s before the next tag, and play then resumes at the first of them. `RECOVERY`, `CHALLENGE` and `CARD` never restart play.

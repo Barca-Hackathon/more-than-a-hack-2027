@@ -6,8 +6,9 @@ Metrica analysts' event data rather than the corrected-tracking ownership behind
 ground truth, so use the scores for relative decisions only.
 
 Source: https://github.com/metrica-sports/sample-data. Their README asks that public use
-acknowledges the source; the tech doc must do so. The data is downloaded into .cache/external/
-(gitignored) and never committed.
+acknowledges the source; the tech doc must do so. The raw files are downloaded once into
+data/other_matches/metrica/ and kept there (never deleted, never committed); parsed arrays are
+cached in .cache/external/.
 
     Games 1, 2   CSV tracking (one file per team, x/y only) + RawEventsData.csv
     Game 3       EPTS tracking (frame:players:ball, x/y only) + metadata XML + events JSON
@@ -60,7 +61,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from ._paths import CACHE_DIR, ensure_repo_on_path
+from ._paths import CACHE_DIR, OTHER_MATCHES_DIR, ensure_repo_on_path
 from .context import AWAY, HOME, Context
 
 ensure_repo_on_path()
@@ -81,7 +82,7 @@ FILES = {
         "Sample_Game_3/Sample_Game_3_metadata.xml",
         "Sample_Game_3/Sample_Game_3_tracking.txt"),
 }
-RAW_DIR = os.path.join(CACHE_DIR, "external", "raw")
+RAW_DIR = os.path.join(OTHER_MATCHES_DIR, "metrica")    # raw downloads, kept for good
 CACHE_VERSION = 1
 SPEED_HALF_WINDOW = 2          # central difference over +-2 frames for player speed
 

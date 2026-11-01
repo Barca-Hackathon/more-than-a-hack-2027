@@ -6,8 +6,9 @@
 #   2. `predict` gives byte-identical files run twice in the copy (cold cache, then warm);
 #   3. the file passes the organisers' validator;
 #   4. it is byte-identical to the file this checkout produces;
-#   5. retraining the control model from the public Metrica data (downloaded into the copy)
-#      gives the shipped models/control_v1.json byte for byte;
+#   5. retraining the control model from the public Metrica data gives the shipped
+#      models/control_v1.json byte for byte (the raw files come from data/other_matches/, linked
+#      like the rest of data/, so they are downloaded at most once and never deleted);
 #   6. the test suite passes in the copy, including the tests that need the Metrica data.
 #
 #   scripts/check_reproducibility.sh           # copy of what git would commit (works before a commit)

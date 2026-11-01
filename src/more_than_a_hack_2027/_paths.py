@@ -13,6 +13,9 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 CACHE_DIR = os.path.join(ROOT, ".cache")
+# Raw downloads of other matches (Metrica, the open DFL games). Kept for good: never deleted, and,
+# like everything under data/, never committed.
+OTHER_MATCHES_DIR = os.path.join(ROOT, "data", "other_matches")
 RESULTS_DIR = os.path.join(ROOT, "evaluation", "results")
 PUBLIC_GT = os.path.join(ROOT, "evaluation", "gt", "BAR-ATH_possession_gt_public.csv")
 
