@@ -106,7 +106,8 @@ def _cmd_eval_external(args):
             graded = eg.ctx.half_of_frame > 0
             arrays = {"ball": eg.ctx.ball, "xy": eg.ctx.xy, "team_of_slot": eg.ctx.team_of_slot}
             print(game, variant, "labels", external.possession_stats(eg.labels, eg.ctx.halves))
-            print(game, variant, "input ", degrade.describe(arrays, graded))
+            live = graded & (eg.labels != external.pm.D)
+            print(game, variant, "input ", degrade.describe(arrays, graded, live))
     methods = {name: eval_external.METHODS[name] for name in args.methods}
     models = None
     if eval_external.TRAINED & set(methods):

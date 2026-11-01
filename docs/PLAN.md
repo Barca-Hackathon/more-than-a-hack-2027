@@ -6,10 +6,10 @@
 |---|---|
 | **M0 platform** (P1) | **done** — data layer + cache, `Context`, CLI, Viterbi decoder, bit-exact baseline port, 14 tests passing |
 | **Dead ball** (P2) | **v1 done.** `deadball.py`, `hmm2.py`, `restart.py`, `ball.py` (cleaning), `io_tagging.py`, pipeline method `v1`. Two robustness bugs found through P4 and fixed (see "What v1 implements"). Thresholds are still untuned priors |
-| **Ball & control** (P3) | **control v1 done.** `control.py`: a team-symmetric logistic model trained on the external games, shipped as `models/control_v1.json` (retrained Nov 1 on the corrected labels); pipeline method **`v2`** (current best). Held-out external spellF1 **0.720** on the corrected labels (Nov 1 settings 0.695, v1 0.456). Next: H↔A boundary timing on 2–8 s possessions (see "Where the error is now") |
-| **External validation** (P4) | **harness v1 done; labels corrected Nov 1.** `external.py`, `degrade.py`, `eval_external.py`, CLI `eval-external`; leave-one-game-out training for learned stages. Two label rules (`external.LABEL_RULES`): a BALL LOST never starts a possession, and a one-touch recovery is not one. Spells per game ~375 → ~245; most old "short possessions" were artefacts. `tune.py` (CLI `tune` → [`docs/TUNING.md`](TUNING.md)) chooses decoder settings over 3 seeds under both label readings. Next: search over P2 thresholds; make `degrade.py` drop the ball in live play |
+| **Ball & control** (P3) | **control v1 done.** `control.py`: a team-symmetric logistic model trained on the external games, shipped as `models/control_v1.json` (retrained Nov 1 on the corrected labels); pipeline method **`v2`** (current best). Held-out external spellF1 **0.669** since the external games also lose the ball in live play as BAR-ATH does (0.720 without those gaps; v1 0.434). Next: dead-ball calls that survive ball gaps, then more temporal context for the team model (see "Live-play ball gaps") |
+| **External validation** (P4) | **harness v1 done; labels corrected Nov 1.** `external.py`, `degrade.py`, `eval_external.py`, CLI `eval-external`; leave-one-game-out training for learned stages. Two label rules (`external.LABEL_RULES`): a BALL LOST never starts a possession, and a one-touch recovery is not one. Spells per game ~375 → ~245; most old "short possessions" were artefacts. `tune.py` (CLI `tune` → [`docs/TUNING.md`](TUNING.md)) chooses decoder settings over 3 seeds under both label readings. Since Nov 1 `degrade.py` also hides the ball in live play at BAR-ATH's measured rate (see "Live-play ball gaps"). Next: search over P2 thresholds |
 | Decoder (P1) | `decode.viterbi_min_dead`: D runs ≥ `min_dead_s` (1 s), which closed a shortcut that capped the switch penalty |
-| **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD = "v2"`); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). The submission was re-frozen the same day after the label fix (switch 25 → 50, model retrained): sha256 `46fa8c61…`, 252 possessions. See "Freeze and reproducibility (M3)" |
+| **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD = "v2"`); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). Re-frozen twice the same day: after the label fix (switch 25 → 50, model retrained; sha256 `46fa8c61…`), then after adding live-play ball gaps to the degradation (w_control 3.2, switch 70, model retrained): sha256 `f1d4a191…`, 260 possessions. See "Freeze and reproducibility (M3)" |
 | Ball-free model + stretch (P5) | not started |
 
 How to run what exists now:
@@ -190,7 +190,9 @@ So team evidence was the lever. Rather than hand-tune a control state machine, `
 
 ### Selection and results (degraded external games, leave-one-game-out)
 
-**Current (Nov 1, corrected labels; [`docs/TUNING.md`](TUNING.md)).**
+**Current (Nov 1 evening):** the same search on games that also lose the ball in live play picks w_control 3.2 / switch 70, a tie with the setting below; held-out estimate 0.669. See "Live-play ball gaps" and [`docs/TUNING.md`](TUNING.md).
+
+**Before the live-play gaps (Nov 1, corrected labels).**
 
 - **Search.** `tune` runs a grid of `w_control` ∈ {0.8, 1.6, 3.2} × `switch` ∈ {12, 25, 35, 50, 70, 100}: 3 seeds × 3 games, each game scored by a model that did not see it.
 - **Criterion.** The choice maximises the mean spellF1 under the two label readings: *main* (both rules) and *alt* (`loss` only, which counts one-touch plays). We cannot tell which one the organisers' GT follows. The old labels are reported but never used to choose.
@@ -198,7 +200,7 @@ So team evidence was the lever. Rather than hand-tune a control state machine, `
 
   | | main | alt | old |
   |---|---|---|---|
-  | **w1.6 / s50 (now)** | **0.720** | 0.630 | 0.590 |
+  | **w1.6 / s50 (chosen then)** | **0.720** | 0.630 | 0.590 |
   | w1.6 / s25 (Nov 1) | 0.695 | **0.639** | **0.599** |
   | best on main alone (w1.6 / s70) | 0.724 | 0.618 | 0.576 |
 
@@ -291,11 +293,19 @@ Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with th
 - Seed sensitivity: seed 1 gives a v1 degraded mean of 0.439 too (±0.01 per game). Decide on means over games, and add seeds before trusting gaps below ~0.02.
 - Where the remaining error is: live/dead is at 0.96 on both variants, while team accuracy drops from 0.88 to 0.83 when degraded. Possession *team* evidence (P3 `control.py`, P5 `shape.py`) is the lever now, not dead ball.
 
+### Live-play ball gaps (Nov 1)
+
+- **What changed.** Metrica's ball is visible on ~99% of live frames; BAR-ATH's on ~93% of the frames v2 calls live. `degrade.live_gaps` now replays BAR-ATH's three kinds of live-play gap (`degrade.LIVE_GAPS`): 10 losses of 5–11 s inside live play per 50 live minutes, a loss just before 27% of stoppages, and a late pick-up after 6% of restarts. They are measured against v2's own live/dead calls on BAR-ATH (GT-free); placing them on a Metrica game uses its labels, which only says where play is live. Gaps only hide the ball.
+- **Cost:** −0.044 spellF1 at fixed settings (0.720 → 0.676), all of it through the dead-ball stage. It reads a missing ball as a dead ball and cuts possessions in two: on seed 0 it labels ~9,000 live frames per game D (against ~2,000 the other way), through ~19 false stoppages per game (median 7 s) and stoppage edges that start up to 10 s early or restart up to 5 s late.
+- **Ceilings with gaps** (seed 0, held out): perfect team calls on the frames v2 calls live 0.843; perfect dead-ball calls 0.718; a perfect team model on ball-unseen live frames +0.009 at most, so the planned `shape.py` waits.
+- **Re-tuned** on the gapped games (`tune`, [`docs/TUNING.md`](TUNING.md)): w_control 3.2 / switch 70, a tie with w 1.6 / switch 50 (+0.0002, paired s.e. 0.003). The rule fixed before the run picks the top of the table, so it ships. Leave-one-game-out estimate 0.669 main, 0.595 alt. The control model was retrained on the gapped games (the reproducibility check requires it).
+- **BAR-ATH:** 260 possessions (252 before). Public 5-minute check, logged after the choice: spellF1 0.588, macroF1 0.862 (0.606 / 0.868 before; band ±0.32).
+
 ### Open items for P4
 
 - Hyperparameter search for P2's thresholds and the stop/restart penalties. Use the `tune.py` pattern: 3 seeds, held out, under both label readings. The degraded variant is the decision variant; clean is a sanity check.
 - ~~Multi-seed selection and paired bootstrap~~ done: `tune.py` selects over 3 seeds, and `ablation.py` gives paired intervals (row "decoder as frozen on Nov 1").
-- **Ball dropout in live play.** `degrade.py` leaves Metrica's ball visible on 99% of live frames, against ~93% on BAR-ATH. Replay BAR-ATH's live-play ball-gap lengths, measured on v2's own live/dead calls (GT-free), so that `shape.py` (P5) has something to be measured on.
+- ~~Ball dropout in live play~~ done (Nov 1): see "Live-play ball gaps".
 - Fit duration priors (spell and stoppage lengths) on the external labels for the HSMM (P1).
 - Optionally supervise the dead-ball HMM on the external labels, and check that it beats the unsupervised EM under LOGO.
 
@@ -304,8 +314,10 @@ Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with th
 ### What is frozen
 
 - **Method:** `pipeline.SUBMISSION_METHOD = "v2"` with `V2_DEFAULTS` and the shipped `models/control_v1.json`. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
-- **Output today (re-frozen Nov 1, after the label fix):** w_control 1.6, switch 50, control model retrained on the corrected labels. 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`. A hash says nothing about the labels, so it is safe to record here.
-- **History:** first freeze (Nov 1 morning): switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings.
+- **Output today (re-frozen Nov 1 evening, after adding live-play ball gaps):** w_control 3.2, switch 70, control model retrained on the gapped games. 260 possessions, sha256 `f1d4a1919a3e05dd354bfacc9d63b7583eb4f262c26c0eca3fc97052898a0550`. A hash says nothing about the labels, so it is safe to record here.
+- **History:**
+  - first freeze (Nov 1 morning): switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings;
+  - after the label fix: w_control 1.6, switch 50, 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`. The step to w 3.2 / switch 70 is a tuning tie that follows the harness change, not an improvement (see "Live-play ball gaps").
 - **Changing it** (an M2 improvement): the new method must beat v2 on the held-out external games by more than the ablation's bootstrap interval. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here.
 
 ### Reproducibility check (`scripts/check_reproducibility.sh`)
@@ -325,26 +337,26 @@ Re-freeze (Nov 1, after the label fix): 75 files, all six checks pass with `EXPE
 
 ### What the ablation says ([`docs/ABLATION.md`](ABLATION.md))
 
-Held-out, degraded, 3 games × 3 seeds, corrected labels, decoder settings fixed at v2's (switch 50):
+Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected labels, decoder settings fixed at v2's (w_control 3.2, switch 70):
 
-- **Stages:** the dead-ball stage is worth +0.084 spellF1 (baseline 0.372 → v1 0.456). The learned control model is worth +0.264 (→ v2 0.720).
-- **The Nov 1 decoder (switch 25):** −0.024 [−0.031, −0.018]. This is the evidence for the re-freeze.
-- **Every control feature group now matters** (all intervals exclude 0):
+- **Stages:** the dead-ball stage is worth +0.080 spellF1 (baseline 0.354 → 0.434 with nearest-player team evidence). The learned control model is worth +0.235 (→ v2 0.669).
+- **The Nov 1 decoder (w 1.6, switch 25):** −0.013 [−0.017, −0.009].
+- **Control feature groups** (proximity's interval touches 0, the rest exclude it):
 
   | without | Δ spellF1 |
   |---|---|
-  | temporal context | −0.086 |
-  | look-ahead | −0.037 |
-  | carry | −0.029 |
-  | ball direction | −0.019 |
-  | proximity | −0.013 |
+  | temporal context | −0.118 |
+  | look-ahead | −0.052 |
+  | carry | −0.030 |
+  | ball direction | −0.018 |
+  | proximity | −0.008 |
   | team shape | −0.008 |
 
   On the old labels, carry and team shape were indistinguishable from zero. They lost to one-touch plays that were labelled as possessions.
-- **The 1 s minimum stoppage is now essential:** −0.054 [−0.063, −0.044]. At switch 50, a turnover through a short fake D is much cheaper than a switch, and `viterbi_min_dead` is what closes that route.
-- **Indistinguishable from zero:** restart-team evidence, +0.001 [−0.002, +0.004]. The external games have no Smart Tagging, so the part of it that comes from the tags can only matter on BAR-ATH, and the harness cannot measure that.
-- **Noise floor:** v2's spread across degradation seeds is 0.004. A config difference below ~0.01 means nothing without a paired interval.
-- **Clean tracking is worth +0.057.** That is roughly the most this pipeline can gain from better input. It matters for the Nov 8 go/no-go on video ball detection, which can recover only part of that gap.
+- **The 1 s minimum stoppage is essential:** −0.061 [−0.069, −0.053]. At switch 50, a turnover through a short fake D is much cheaper than a switch, and `viterbi_min_dead` is what closes that route.
+- **Indistinguishable from zero:** restart-team evidence, +0.001 [−0.001, +0.003]. The external games have no Smart Tagging, so the part of it that comes from the tags can only matter on BAR-ATH, and the harness cannot measure that.
+- **Noise floor:** v2's spread across degradation seeds is 0.007. A config difference below ~0.01 means nothing without a paired interval.
+- **Clean tracking is worth +0.107** (+0.057 before the live-play gaps). That is roughly the most this pipeline can gain from better input. It matters for the Nov 8 go/no-go on video ball detection, which can recover only part of that gap.
 
 Nothing was removed. Every component either helps or is within noise.
 

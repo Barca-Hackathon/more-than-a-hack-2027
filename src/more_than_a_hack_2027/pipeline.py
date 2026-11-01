@@ -126,10 +126,13 @@ def run_v1(ctx, cfg=None, return_parts=False, tags=None):
 # penalties are chosen on the external games (eval_external), not here.
 V2_DEFAULTS = {
     # Chosen on the degraded external games by tune.py (docs/TUNING.md): best mean spellF1
-    # under both label readings, 3 seeds, each game scored by a model that did not see it. The
-    # Nov 1 freeze had switch 25, tuned on labels that counted one-touch plays as possessions.
-    "w_control": 1.6,
-    "switch": 50.0,
+    # under both label readings, 3 seeds, each game scored by a model that did not see it.
+    # History: switch 25 (Nov 1 freeze, labels that counted one-touch plays), then w 1.6 /
+    # switch 50 (corrected labels), then this once the games also lose the ball in live play
+    # (degrade.LIVE_GAPS). The last step is a tie (+0.0002 over w 1.6 / switch 50), kept
+    # because the rule fixed before the run picks the top of the table.
+    "w_control": 3.2,
+    "switch": 70.0,
     "stop": 2.0,
     "restart": 2.0,
     "min_dead_s": 1.0,     # no D run shorter than this (decode.viterbi_min_dead)
