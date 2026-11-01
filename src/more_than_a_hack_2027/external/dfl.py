@@ -28,7 +28,7 @@ MATCHES = ("J03WMX", "J03WN1", "J03WOH", "J03WOY", "J03WPY", "J03WQQ", "J03WR9")
 RAW_DIR = os.path.join(OTHER_MATCHES_DIR, "dfl")
 ARRAY_DIR = os.path.join(CACHE_DIR, "dfl")
 PITCH = (105.0, 68.0)
-FILES = {"meta": "{}_matchinfo.xml", "tracking": "{}_positions.xml"}
+FILES = {"meta": "{}_matchinfo.xml", "tracking": "{}_positions.xml", "event": "{}_events.xml"}
 
 
 def raw_path(match_id, kind):
