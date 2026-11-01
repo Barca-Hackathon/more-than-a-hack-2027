@@ -211,6 +211,20 @@ def _cmd_dfl_inputs(args):
     return 0
 
 
+def _cmd_skillcorner_inputs(args):
+    import warnings
+
+    from .external import skillcorner
+    from .validation import harness
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    missing = harness._competition_missing_counts()
+    for match_id in args.matches or skillcorner.match_ids():
+        for seed in args.seeds:
+            print(skillcorner.build_inputs(match_id, seed, missing_counts=missing), flush=True)
+    return 0
+
+
 def _cmd_tune_seq(args):
     import warnings
 
@@ -309,6 +323,13 @@ def build_parser():
                    help="DFL's per-touch flag, or the flag filtered by control events")
     p.add_argument("--matches", nargs="+", default=None, help="default: all seven")
     p.set_defaults(func=_cmd_dfl_inputs)
+
+    p = sub.add_parser("skillcorner-inputs",
+                       help="download the SkillCorner open matches and cache their "
+                            "sequence-model inputs")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1], help="degradation seeds")
+    p.add_argument("--matches", nargs="+", type=int, default=None, help="default: all twenty")
+    p.set_defaults(func=_cmd_skillcorner_inputs)
 
     p = sub.add_parser("tune-seq",
                        help="held-out decoder choice for v3 on the external games (torch)")
