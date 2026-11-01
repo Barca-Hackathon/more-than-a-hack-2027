@@ -1,0 +1,31 @@
+[project]
+name = "more-than-a-hack-2027"
+version = "0.1.0"
+description = "Frame-level ball possession for More than a Hack 2027 (Phase 1)"
+readme = "README.md"
+authors = [
+    { name = "Mert Kamberov", email = "mertkamber2003@gmail.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "ipykernel>=7.4.0",
+    "kloppy>=3.19.1",
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "pandas>=3.1.0",
+]
+
+[project.scripts]
+more-than-a-hack-2027 = "more_than_a_hack_2027:main"
+
+[build-system]
+requires = ["uv_build>=0.12.24,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.2.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

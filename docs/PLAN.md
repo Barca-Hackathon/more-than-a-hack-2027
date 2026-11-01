@@ -1,0 +1,385 @@
+# MTAH 2027 Phase 1: ball possession, team plan
+
+## Status
+
+| milestone | state |
+|---|---|
+| **M0 platform** (P1) | **done** — data layer + cache, `Context`, CLI, Viterbi decoder, bit-exact baseline port, 14 tests passing |
+| **Dead ball** (P2) | **v1 done.** `deadball.py`, `hmm2.py`, `restart.py`, `ball.py` (cleaning), `io_tagging.py`, pipeline method `v1`. Two robustness bugs found through P4 and fixed (see "What v1 implements"). Thresholds are still untuned priors |
+| **Ball & control** (P3) | **control v1 done.** `control.py`: a team-symmetric logistic model trained on the external games, shipped as `models/control_v1.json` (retrained Nov 1 on the corrected labels); pipeline method **`v2`** (current best). Held-out external spellF1 **0.720** on the corrected labels (Nov 1 settings 0.695, v1 0.456). Next: H↔A boundary timing on 2–8 s possessions (see "Where the error is now") |
+| **External validation** (P4) | **harness v1 done; labels corrected Nov 1.** `external.py`, `degrade.py`, `eval_external.py`, CLI `eval-external`; leave-one-game-out training for learned stages. Two label rules (`external.LABEL_RULES`): a BALL LOST never starts a possession, and a one-touch recovery is not one. Spells per game ~375 → ~245; most old "short possessions" were artefacts. `tune.py` (CLI `tune` → [`docs/TUNING.md`](TUNING.md)) chooses decoder settings over 3 seeds under both label readings. Next: search over P2 thresholds; make `degrade.py` drop the ball in live play |
+| Decoder (P1) | `decode.viterbi_min_dead`: D runs ≥ `min_dead_s` (1 s), which closed a shortcut that capped the switch penalty |
+| **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD = "v2"`); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). The submission was re-frozen the same day after the label fix (switch 25 → 50, model retrained): sha256 `46fa8c61…`, 252 possessions. See "Freeze and reproducibility (M3)" |
+| Ball-free model + stretch (P5) | not started |
+
+How to run what exists now:
+
+```bash
+uv sync
+uv run more-than-a-hack-2027 cache      # parse the ATD once into .cache/ (~2 s)
+uv run more-than-a-hack-2027 info       # sanity summary of the loaded match
+uv run more-than-a-hack-2027 predict --method baseline --window 50 --out evaluation/results/x.csv
+uv run more-than-a-hack-2027 deadball --table .cache/stoppages.csv   # dead-ball diagnostics
+uv run more-than-a-hack-2027 predict --method v1 --out .cache/v1.csv  # dead ball + placeholder team evidence
+uv run more-than-a-hack-2027 predict --out .cache/v2.csv              # the frozen submission method (v2)
+uv run more-than-a-hack-2027 train-control              # refit models/control_v1.json (deterministic)
+uv run more-than-a-hack-2027 eval-external              # Metrica games, clean + degraded (downloads once, ~15 s)
+uv run more-than-a-hack-2027 eval-external --describe   # also the label and input statistics per game
+uv run more-than-a-hack-2027 tune --jobs 3 --out docs/TUNING.md   # choose w_control / switch, 3 seeds (~5 min)
+uv run more-than-a-hack-2027 ablate --out docs/ABLATION.md   # held-out ablation table, 3 seeds (~5 min)
+scripts/check_reproducibility.sh        # clean copy -> predict twice, validate, retrain model, tests
+uv run pytest -q
+```
+
+## Context
+
+The task is to label all 199,319 frames of the tactical video of BAR–ATH with `H`/`A`/`D`/`X`. The board ranks on **spellF1**: predicted possessions are matched one-to-one with true ones by temporal IoU, and F1 is averaged over IoU 0.3–0.7. **macroF1** breaks ties. The floor to beat is `baseline_smooth50` at spellF1 0.2433 on the full match. It assigns each frame to the team of the nearest player and then takes a ±2 s majority vote.
+
+**Deadline Nov 17, 2026; we submit Nov 16.** There are three deliverables: `<team>.csv`, this public repo (it must regenerate the file byte-for-byte), and a short technical document (`<team>.pdf`/`.md`).
+
+What we have: tracking (ATD) with 46 track slots, team membership only and no player IDs. We also have 638 Smart Tagging phases, a homography (tactical, valid on every frame), and both videos.
+
+### Facts checked against the data
+
+These differ from the docs or add to them.
+
+- Player speed is in **m/s**, although the XML labels it kph. The ball speed channel is almost always NaN, so we compute ball velocity ourselves.
+- The ATD has no ball-owner or ball-state fields: positions and speed only.
+- Barcelona (home) attacks **+x in the first half** and −x in the second. The goalkeeper positions confirm what the XML says.
+- **The ball is missing in long blocks, not flickers.** There are only 149 gaps in the graded frames (median 11 s, p90 34 s), and 99.9% of missing frames sit in gaps longer than 5 s. Interpolation is useless. While the ball is missing, team evidence has to come from player shape.
+- The ball track is smooth when present: only 21 frames are more than 1 m off a 5-frame median. Apparent speeds above ~40 m/s are **balls in the air** projected onto the ground plane, which is a useful "aerial ball, no control" cue.
+- The ball is observed **outside the pitch** on 3,949 graded frames, in 80 episodes (58 touchline, 22 goal line). The 22 goal-line episodes equal exactly the tagged corners (12) plus goal kicks (10).
+- The public GT contains **short possessions**: 0.8 s, 1.3 s, 2.8 s, 3.2 s and 3.5 s. Dead stretches last 5–20 s.
+
+## Design rules that follow from the metric
+
+These come from `evaluation/possession_metrics.py`.
+
+1. **Never write `X` on a graded frame.** spellF1 forward-fills an `X` with the previous label anyway, and macroF1 counts it as a miss. `submission.write()` enforces this.
+2. **Segment count dominates.** A possession is a maximal H or A run, and D splits runs. A one-frame flicker creates two fake spells. A missed D between two same-team spells merges them, and a spurious D splits one. So the output must be **decoded as segments**, not voted per frame.
+3. **Boundaries need to be sharp, not smoothed.** An offset of ±1 frame is free and 3 frames still scores 0.98, but 1 s scores 0.65. Snap transitions to detected events: control touches, ball-out moments and restarts.
+4. **Use soft duration priors, not hard minimums.** Sub-second possessions are real, and missing one merges its two neighbours.
+5. **The GT means "last team in control".** Loose balls, passes in flight, deflections and aerial duels keep the previous team.
+6. **Rules compliance.** Never tune or choose between variants on the public 5 minutes; it is a correctness check only. Use no frame-specific constants: detect kickoffs and restarts algorithmically. Do no hand labelling of this game. Pseudo-labels produced by an algorithm on this game are fine.
+
+## Architecture (`src/more_than_a_hack_2027/`)
+
+Every stage is `stage(ctx, cfg) -> np.ndarray` with a leading axis of 199,319 frames, indexed by video frame. The full contract is in the `context.py` docstring.
+
+| module | owner | state | responsibility |
+|---|---|---|---|
+| `io_atd.py` | P1 | ✅ | Parse the raw ATD (~2 s) into `.cache/` `.npy` files, memory-mapped. Metres, m/s. Asserts the frame ids are 1..n. |
+| `context.py` | P1 | ✅ | `Context` dataclass: positions, ball, team of each slot, halves, attack direction, `half_of_frame`. |
+| `nearest_player.py` | P1 | ✅ | Bit-exact port of `starter/baseline.py`. Also returns the distance and the slot. |
+| `decode.py` | P1 | ✅ v1 | Viterbi over {H, A, D} with transition penalties, run per half; `viterbi_min_dead` forces D runs ≥ 1 s. Next: duration priors for H/A, boundary snapping. |
+| `submission.py` | P1 | ✅ | Writes the CSV, refuses graded `X`, re-validates with the official reader. |
+| `pipeline.py`, `__init__.py` | P1 | ✅ | Methods `baseline`, `hmm-nearest` (an untuned wiring test) and `v1` (dead ball + nearest-player team evidence). CLI. |
+| `io_tagging.py` | P2 | ✅ | Smart Tagging to frame intervals. Tag team names map to H/A by comparing with `ctx.team_names`. |
+| `ball.py` | P2 → P3 | ✅ cleaning | Ball cleaning (median spike filter), velocity, out-of-bounds distance, aerial flag. Touch detection is next (P3). |
+| `deadball.py`, `hmm2.py` | P2 | ✅ v1 | Per-frame dead-ball evidence plus a refined list of stoppages (see below). |
+| `restart.py` | P2 | ✅ v1 | Restart frame and the team taking it, for each stoppage. |
+| `control.py` | P3 | ✅ v1 | Per-frame H/A log-odds from a team-symmetric logistic model on windowed ball/player features, trained on the external games (see "Control design"). |
+| `shape.py` | P5 | — | Possession from team shape while the ball is missing. Trained on algorithmic pseudo-labels from `control.py`. |
+| `tag_prior.py` | P5 | — | Smart Tagging team priors. Attacking codes mean that team has the ball; DEFENDING / DEFENSIVE TRANSITION mean the other team does. |
+| `external.py`, `degrade.py`, `eval_external.py` | P4 | — | External validation harness (below). |
+| `ablation.py`, `scripts/check_reproducibility.sh` | P1, P4 | — | M3: held-out ablation table (`ablate` → `docs/ABLATION.md`) and the clean-copy reproducibility check. |
+| `tune.py` | P4 | ✅ | Chooses v2's `w_control` and switch penalty: 3 seeds × 3 games, held out, under two label readings (`tune` → `docs/TUNING.md`). |
+| `diagnostics.py` | all | — | GT-free checks and debug overlays. |
+
+Organiser modules (`games.py`, `starter/`, `evaluation/`) are imported through `_paths.ensure_repo_on_path()` and are **never modified**.
+
+## Dead-ball design (P2)
+
+### What the data shows
+
+These observations come from the tracking, the tags, and the public GT, which we use only to understand the convention.
+
+- **Convention.** D starts at the whistle, or at the frame the ball crosses the line. D ends at the restart kick or throw.
+- **Collective player speed is the strongest signal.**
+  - In a stoppage it is a long, smooth, slowly decaying plateau at about 0.5–1.3 m/s.
+  - In play it oscillates between 1 and 5 m/s, even during slow build-up.
+  - The ball is usually missing or out during stoppages. In live slow phases it keeps being passed.
+- **The ball moves during stoppages.** Players knock it back to the restart spot, so ball motion alone does not mean "alive".
+- **Speed alone overlaps.** Smoothed team speed has a median of 1.5 m/s shortly after a ball-out and 2.3 m/s during fast passes.
+- **Smart Tagging set pieces are weak timing priors.**
+  - The windows are 35 s long (5 s for kickoffs), and the restart sits anywhere from before the window starts to ~10 s into it.
+  - Only 5 free kicks are tagged, so fouls are mostly untagged.
+  - Throw-ins have Team = N/A.
+- **Kickoff formation is detectable but not by the ball.**
+  - Before kickoffs, 90–95% of observed players stand in their own half (tolerance 1 m, ~21 players observed). The ball is usually unseen until the kick.
+  - The thresholds must be ~0.9, and they must not require a visible ball.
+
+### Approach
+
+1. **Certain-dead anchors.**
+   - Ball beyond a line by ≥0.3 m, in episodes of ≥5 frames or with ≥0.5 m excursion. Dead from the crossing frame for at least 2 s.
+   - Every frame of a half before its first detected kickoff. In the second half, the graded frames before kickoff are all D.
+   - Goal-line outs between the posts (goals) until the next detected kickoff.
+2. **A semi-supervised two-state HMM (live/dead), learned by EM on this game's own tracking.**
+   - Emissions: log of team speed over ±1 s, log of the std of team speed over ±3 s, ball seen, ball moving >4 m/s.
+   - The anchors are clamped to dead.
+   - No labels are involved. The same model can later be fitted with supervision on the external games.
+   - Output: emission LLR and the forward-backward posterior P(dead).
+3. **Stoppage refinement.** Turn the posterior into intervals, then:
+   - Snap starts to the ball-out crossing, or to the steepest team deceleration (whistle) minus a reaction lag.
+   - Snap ends to the last restart event: a kick from a still ball with a player within 2 m, the ball re-entering from outside (throw-in), or the ball reappearing.
+4. **Restart team (`restart.py`), as summed log-odds of:**
+   - the nearest player at the restart;
+   - the Smart Tagging team, when not N/A;
+   - for ball-outs, the **opponent of the last toucher** (this holds for throw-ins, corners and goal kicks);
+   - after a goal, the team defending that goal;
+   - at a kickoff, the team with a player inside the centre circle.
+5. **Decoder input.** Strong ±D evidence inside and outside refined stoppages, scaled by confidence, plus restart-team evidence for the first ~1 s after each restart.
+
+### What v1 implements, and what changed during the build
+
+- **Kicks are ramps, not steps.** The ball track is already smoothed by the tracker, so a kick is a ~1.5 s rise in speed. A kick is defined as the upward crossing of 5 m/s by a ball that was below 1.5 m/s at some point in the previous 1.5 s, with a player within 2 m recently.
+- **Lofted balls fake ball-outs.** A high ball near a touchline projects outside the pitch for a few frames. Out episodes are rejected if the ball is back in play within 2 s, or if they start with an aerial flag.
+- **Tempered posterior.** EM fits on every 5th frame, so emissions are divided by 5 when evaluated at 25 fps. Without that, each observation counts five times.
+- **Goals come from kickoffs.** The ball is rarely tracked into the net, so a mid-half kickoff is what marks a goal. All four found agree with the "Kick Off (After Goal)" tags (~3.9 s after each tag starts).
+- **Restarts never land inside a certain-dead anchor** or before the posterior went dead. Refined stoppages shorter than 2 s are dropped, kickoffs excepted.
+- **Found on the external games (P4), both invisible on BAR-ATH:**
+  - A goal-line out between the posts (a shot just wide) late in a half was "confirmed" as a goal by the *next half's* kickoff, which anchored the rest of the half as dead (120 s of open play on Metrica game 3). A goal now needs a mid-half kickoff in the same half, with no other ball-out in between.
+  - "Dead until the first kickoff" had no time limit. When the ATD is missing most players at the opening kickoff (3% of BAR-ATH graded frames have < 10 players), the kickoff is not detected and the anchor ran to the next goal's kickoff. It now applies only if that kickoff is within `pre_kickoff_max_s` (300 s) of the half start.
+  - BAR-ATH output of the `deadball` command is unchanged by both fixes.
+
+### GT-free diagnostics (`more-than-a-hack-2027 deadball`)
+
+Current v1 values are shown next to the prior used to judge them.
+
+| check | prior | v1 |
+|---|---|---|
+| stoppages | ~100–130 in a pro match | 144 (goal 4, half start 2, goal line 12, touchline 25, whistle 101) |
+| dead share of graded time | ~45–50% (LaLiga ball in play ~53–56 min) | 52% |
+| stoppage duration | — | p10 4.2 s, median 12.2 s, p90 48.5 s |
+| set-piece tags with a restart nearby | high | 55/59 |
+| validated ball-outs inside a stoppage | all | 62/62 |
+| EM states, learned without labels | — | live 2.31 m/s, ball seen 92%; dead 1.01 m/s, ball seen 27% |
+
+**Public 5-minute correctness check (M1, logged, not used for any decision):** dead-ball F1 0.81 (baseline 0.32), live/dead F1 0.95. The window holds only 17 possessions, and the scorer's bootstrap band there is ±0.32, so this confirms the wiring and nothing more.
+
+### Open items for P2
+
+- Tune every threshold on P4's external games with `eval_external.logo_search`. Top candidates: `posterior_threshold`, `restart_lag_frames`, `whistle_lag_frames`, `min_stoppage_s`, and the restart-team weights. `pipeline.run_v1` takes nested overrides: `{"deadball": {...}, "restart": {...}, "ball": {...}, "switch": ...}`.
+- Restarts with `restart_kind = posterior` (42 of them) have no event to snap to. Check whether a team-acceleration onset snaps them better.
+- 20 restarts have disagreeing sources (taker vs tag vs last toucher). Inspect a sample with the homography overlays.
+- v1 produced 456 possessions over the match because of the placeholder nearest-player team evidence; v2 (with `control.py`) produces 252 (290 before the Nov 1 re-freeze).
+
+## Control design (P3)
+
+### Why a learned model
+
+On the degraded external games the nearest player is the right team on only 74–76% of live frames: passes, crosses and clearances fly past opponents, and the ground truth ("last team in control") does not switch on a duel or a deflection. Two ceilings, measured with v1's decoder:
+
+- the true team on every frame v1 calls live → spellF1 +0.13 to +0.16 per game;
+- perfect dead-ball calls with v1's team evidence → +0.01.
+
+So team evidence was the lever. Rather than hand-tune a control state machine, `control.py` learns how to read the features from the external labels, under the same leave-one-game-out protocol as every other decision.
+
+### What v1 implements
+
+- **Features** (18; all written from the home side; windows computed inside a half):
+  - closeness: log-ratio of the two teams' nearest distances to the ball, now and as the minimum over past/future 0.5, 1 and 2 s;
+  - carrying: a player within 2 m whose velocity matches the ball's (relative speed < 3 m/s), so the ball moves *with* him, as window fractions over past/future 1 and 3 s;
+  - last/next carry: the team of the latest (next) carrying frame, decayed over 5 s;
+  - ball velocity and position along the home attack direction; team centroid push; players within 5 m.
+- **Team symmetry by construction.** Every feature flips sign when the teams are swapped (tested), and there is no intercept. The model therefore cannot learn "home has the ball more", which would not transfer between games.
+- **Fit.** L2 logistic regression by Newton's method in numpy: deterministic, so `train-control` reproduces `models/control_v1.json` byte for byte. Training rows are the live, ball-visible frames of the three **degraded** Metrica games, every 3rd frame (85k rows). The weights are almost identical across the three leave-one-out folds. Retrained on Nov 1 on the corrected labels (see "External validation"). The largest weights are now near-past 2 s (+1.21), carry-future 3 s (+1.20), carry-past 3 s (+1.16), near-now (−0.92, which offsets the windowed terms) and ball velocity toward goal (+0.82). The carry windows gained the most (+0.79 / +0.63 before): once one-touch plays stop counting as possessions, carrying the ball is what control looks like. Retraining on the corrected labels moves the held-out score by less than 0.001 at fixed decoder settings (seed 0, switch 25). The labels change the best switch penalty, not the model.
+- **Evidence.** The decoder gets `w_control · log P(team)` per frame, and 0 where the ball is unseen (the decoder then carries the last team, as the GT does).
+- **Decoder interaction.** A grid search exposed that H→A could be bought through a one-frame D for stop + restart + 6. That capped the switch penalty at ~10, so higher values had no effect. `decode.viterbi_min_dead` forbids D runs shorter than 1 s, which real stoppages never are. It is checked against brute-force enumeration.
+
+### Selection and results (degraded external games, leave-one-game-out)
+
+**Current (Nov 1, corrected labels; [`docs/TUNING.md`](TUNING.md)).**
+
+- **Search.** `tune` runs a grid of `w_control` ∈ {0.8, 1.6, 3.2} × `switch` ∈ {12, 25, 35, 50, 70, 100}: 3 seeds × 3 games, each game scored by a model that did not see it.
+- **Criterion.** The choice maximises the mean spellF1 under the two label readings: *main* (both rules) and *alt* (`loss` only, which counts one-touch plays). We cannot tell which one the organisers' GT follows. The old labels are reported but never used to choose.
+- **Chosen: w_control 1.6, switch 50.** It sits at the top of a flat ridge: w3.2/s100 ties, and four more configs are within 0.004.
+
+  | | main | alt | old |
+  |---|---|---|---|
+  | **w1.6 / s50 (now)** | **0.720** | 0.630 | 0.590 |
+  | w1.6 / s25 (Nov 1) | 0.695 | **0.639** | **0.599** |
+  | best on main alone (w1.6 / s70) | 0.724 | 0.618 | 0.576 |
+
+  The new setting gains +0.025 if one-touch plays are not possessions, and loses 0.009 if they are.
+- **Held-out estimate of the procedure** (pick on two games, score the third): **0.719** main, 0.628 alt. For reference, v1 scores 0.459 and the baseline 0.373 on main labels (seed 0).
+- **BAR-ATH (GT-free):** 252 possessions (Nov 1: 290), mean 12.1 s.
+- **Public 5-minute correctness check (logged after the choice, not used for it):** spellF1 0.606, macroF1 0.868 (Nov 1 settings 0.588 / 0.863; bootstrap band ±0.32).
+
+**Superseded (Oct 31, old labels).**
+
+- Grid over `w_control` ∈ {0.4, 0.8, 1.6, 3.2} × `switch` ∈ {6, 12, 25, 50}. The score depended on switch / w_control (~15), and w1.6/s25 was chosen.
+- Held-out spellF1 0.596, against v1 0.439 and baseline 0.352.
+- BAR-ATH: 290 possessions. Public check 0.588 / 0.863.
+
+### Where the error is now (held-out v2, degraded, corrected labels, 3 seeds)
+
+| GT possession length | GT spells / game | recall @ IoU 0.5 | predicted / game | precision |
+|---|---|---|---|---|
+| < 1 s | 7 | 0.03 | 1 | 0.12 |
+| 1–2 s | 12 | 0.29 | 11 | 0.38 |
+| 2–4 s | 38 | 0.44 | 33 | 0.52 |
+| 4–8 s | 51 | 0.63 | 50 | 0.65 |
+| 8–16 s | 63 | 0.84 | 60 | 0.88 |
+| > 16 s | 75 | 0.92 | 73 | 0.92 |
+
+Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with the truth:
+
+| oracle | spellF1 | gain |
+|---|---|---|
+| true team on every frame v2 calls live | 0.902 | +0.185 |
+| GT spells < 4 s | 0.785 | +0.068 |
+| GT spells < 2 s | 0.749 | +0.032 |
+| perfect dead-ball calls | 0.735 | +0.018 |
+| a perfect "turnover here" detector (±0.5 s, weight 5) | 0.726 | +0.009 |
+| true team on live, ball-unseen frames | below v2 | — |
+
+- **Short possessions are no longer the lever.** The "+0.15 from spells under 2 s" measured on the old labels was mostly label artefact.
+- **Where the gain is now:** team calls on 2–8 s possessions (recall 0.44–0.63, mostly boundary timing and medium-length turnovers), then dead ball.
+- **Ball-unseen frames cannot be tested here.** They are 0.8% of GT-live frames on Metrica but 6.7% of v2-live frames on BAR-ATH. The oracle shows nothing on the external games because there is almost nothing there to fix. Writing truth into those few frames without decoding even fragments spells, which is why it lands below v2. Before `shape.py` can be measured, `degrade.py` must also drop the ball during live play, at BAR-ATH's rate.
+
+### Open items for P3
+
+- **Boundary timing:** snap H↔A boundaries to the touch frame. Spells of 2–8 s are often found but miss the IoU threshold. This is now the clearest lever.
+- **Turnover evidence:** still worth trying, but its measured ceiling is small now (+0.009 for a perfect detector added to the decoder).
+- More training data: several degradation seeds as augmentation (cheap), then check the held-out gain.
+- ~~Feature ablation table for the tech doc~~ done: [`docs/ABLATION.md`](ABLATION.md).
+
+## External validation: the only place we tune
+
+- **Data.** Metrica's public sample data (github.com/metrica-sports/sample-data); their README asks that public use acknowledges the source, so the tech doc must.
+  - Games 1 and 2: CSV tracking (one file per team) plus `RawEventsData.csv`.
+  - Game 3: EPTS tracking plus JSON events. The player order changes at every substitution (11 format specs), so `external.py` gives every player one fixed slot.
+  - All 25 fps, 105 × 68 m. `external.py` downloads them into `.cache/external/` on first use (gitignored, never committed) and caches the parsed arrays (~3 s for all three).
+- **Labels** (`external.labels_from_events`). Events are converted to frame-level H/A/D. The tech doc must say these come from Metrica analysts' event data, cover 3 games, and are not the provided game.
+  - Stops: `BALL OUT` and shots that go out or in (end frame), fouls (`FAULT RECEIVED`, `CHALLENGE …-FAULT-…` without advantage), offside and hand ball, end of half.
+  - The ball stays dead until the next **tagged** restart: a `SET PIECE` not marked RETAKEN, or a goal kick. Between a whistle and the restart the stream often has 1–3 "after the whistle" actions within ~3 s at walking pace (a ball kicked away, a shot after the flag), so those do not restart play. A few restarts are never tagged; that shows as ≥ 3 play events spanning ≥ 5 s before the next tag, and play then resumes at the first of them. `RECOVERY`, `CHALLENGE` and `CARD` never restart play.
+  - In play, possession changes when the other team **gains** control: its PASS, CARRY, SET PIECE, SHOT or RECOVERY. Challenges never switch it. Since Nov 1, two label rules (`external.LABEL_RULES`) follow CHALLENGE.md's list of what does not count:
+    - **`loss`: a BALL LOST never starts a possession.** Metrica tags both sides of a tackle or interception. The loser's BALL LOST often lands 1–35 frames *after* the winner's RECOVERY, and counting it handed the ball back to the team that had just lost it. This follows from the definition alone.
+    - **`one_touch`: a one-touch RECOVERY is not a possession.** That is a recovery whose team's next own action is a loss (BALL LOST or BALL OUT) within 2 frames: a header or clearance straight back to the opponent or out of play. 232 of 233 such losses are tagged on the same frame as the recovery, and the next shortest gap is 3 frames. The clean tracking agrees: after such a recovery the ball stays within 1.5 m of that team for a median of 6 of the next 25 frames, against 16–25 when the team keeps it. A CARRY of ≤ 2 frames is not a carry either (game 3's export adds a 1-frame CARRY to each one-touch recovery).
+    - **Why it matters:** these artefacts were most of the "short possessions" in the old labels. Before the fix, an oracle on GT spells under 2 s was worth +0.15 spellF1, and the control model's sign was right on only 34% of frames inside GT spells under 1 s: they were not there to be found.
+    - **What is uncertain:** where the organisers' tracking-derived GT draws the one-touch line cannot be checked from here. Decoder settings are therefore chosen to hold up under both `("loss", "one_touch")` and `("loss",)` alone (`tune.py`, [`docs/TUNING.md`](TUNING.md)).
+  - Each period is graded from its first tracking frame, dead until the kickoff (like BAR-ATH's second half). The last frame of period 1 is X so the metric sees two runs.
+  - Result (both rules): dead share 32–45%, 225–258 spells per game (median 8.6–10.3 s; 5–9 under 1 s), 97–100 stoppages. The older labels had 350–401 spells (median 4–5 s); `rules=()` still builds them.
+- **Degradation** (`degrade.py`), calibrated on the competition **input** only:
+
+  | statistic | BAR-ATH ATD | Metrica clean | degraded |
+  |---|---|---|---|
+  | ball missing (graded) | 40.7%, 99.7% of it in gaps > 5 s | 32–41%, ~97% in gaps > 5 s | unchanged (already alike; in both the ball is mostly missing while dead) |
+  | ball accel. autocorrelation lag 1 / lag 5 | 0.989 / 0.859 | −0.45 / 0.00 (piecewise linear, instant kicks) | 0.99 / 0.82–0.84 |
+  | ball \|accel\| p50 / p90 / p99 (m/s²) | 5.7 / 18 / 37 | 0.8 / 6.5 / 286 | 3.3–4.2 / 17.5 / 29–33 |
+  | players per frame | 20.5 (p5 14), not spatial | 22.0 | 20.4–20.6 |
+  | track slots | fragments, no IDs | one per player | a fresh slot per visible run |
+
+  - Ball: 0.5 m white noise, then a Gaussian smoother (σ = 7 frames), both picked by a grid fit to the ATD statistics above. Each visible run is padded by linear extrapolation first, so a ball that crosses a line and disappears is not smoothed back inside (that had cut detected outs from 77 to 16).
+  - Players: the ATD's own per-frame missing-player count is replayed from a seeded offset; who is missing follows a per-player priority redrawn every ~35 s (the ATD's median track run). The series is read from the ATD at run time, never stored in the repo.
+  - Known residuals: smoothed peak ball speed is lower (p99 19 vs 25 m/s), and Metrica's ball is almost never seen while dead (0.5–15%, the ATD's EM estimate is 27%).
+- **Protocol** (`eval_external`). `evaluate()` scores any method with the official `possession_metrics.evaluate`. `logo_search()` does leave-one-game-out selection: for each held-out game it picks the config with the best mean spellF1 (macroF1 tie-break) on the other two, and reports the held-out score. Every hyperparameter choice is made here. Use the harness for relative decisions: event-derived labels are not Metrica's corrected-tracking ownership.
+- **Public 5 min.** Run `evaluation/run_evaluation.py` at milestones as a correctness alarm only, and log the result. Never pick a variant on it.
+
+### First results (Oct 31, seed 0; untuned v1; old labels, superseded)
+
+| method | variant | spellF1 (g1 / g2 / g3) | mean spellF1 | macroF1 | live/dead F1 | team acc. | spells (GT 375) |
+|---|---|---|---|---|---|---|---|
+| baseline smooth50 | clean | 0.430 / 0.412 / 0.389 | 0.410 | 0.827 | 0.925 | 0.875 | 502 |
+| v1 | clean | 0.506 / 0.544 / 0.505 | **0.518** | 0.874 | 0.957 | 0.879 | 377 |
+| baseline smooth50 | degraded | 0.383 / 0.351 / 0.322 | 0.352 | 0.796 | 0.925 | 0.825 | 533 |
+| v1 | degraded | 0.451 / 0.447 / 0.419 | **0.439** | 0.846 | 0.958 | 0.833 | 405 |
+
+- **The degraded variant transfers.** It lands close to the public BAR-ATH check (v1 0.441, baseline 0.326, live/dead 0.948). That check was not used to build or tune anything; the agreement is evidence that the degradation is realistic, not a target.
+- Seed sensitivity: seed 1 gives a v1 degraded mean of 0.439 too (±0.01 per game). Decide on means over games, and add seeds before trusting gaps below ~0.02.
+- Where the remaining error is: live/dead is at 0.96 on both variants, while team accuracy drops from 0.88 to 0.83 when degraded. Possession *team* evidence (P3 `control.py`, P5 `shape.py`) is the lever now, not dead ball.
+
+### Open items for P4
+
+- Hyperparameter search for P2's thresholds and the stop/restart penalties. Use the `tune.py` pattern: 3 seeds, held out, under both label readings. The degraded variant is the decision variant; clean is a sanity check.
+- ~~Multi-seed selection and paired bootstrap~~ done: `tune.py` selects over 3 seeds, and `ablation.py` gives paired intervals (row "decoder as frozen on Nov 1").
+- **Ball dropout in live play.** `degrade.py` leaves Metrica's ball visible on 99% of live frames, against ~93% on BAR-ATH. Replay BAR-ATH's live-play ball-gap lengths, measured on v2's own live/dead calls (GT-free), so that `shape.py` (P5) has something to be measured on.
+- Fit duration priors (spell and stoppage lengths) on the external labels for the HSMM (P1).
+- Optionally supervise the dead-ball HMM on the external labels, and check that it beats the unsupervised EM under LOGO.
+
+## Freeze and reproducibility (M3)
+
+### What is frozen
+
+- **Method:** `pipeline.SUBMISSION_METHOD = "v2"` with `V2_DEFAULTS` and the shipped `models/control_v1.json`. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
+- **Output today (re-frozen Nov 1, after the label fix):** w_control 1.6, switch 50, control model retrained on the corrected labels. 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`. A hash says nothing about the labels, so it is safe to record here.
+- **History:** first freeze (Nov 1 morning): switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings.
+- **Changing it** (an M2 improvement): the new method must beat v2 on the held-out external games by more than the ablation's bootstrap interval. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here.
+
+### Reproducibility check (`scripts/check_reproducibility.sh`)
+
+It builds a clean copy of the repository: the files git would publish, or `--head` for a real `git clone` after committing. The data bundle is linked in from `data/`. In the copy it then:
+
+1. checks for leaks: no `data/`, `.cache/`, private GT, submissions, `.npz`/`.mp4`/`.pdf`, or files over 5 MB;
+2. runs `uv sync --frozen`, then `predict` twice (cold cache, warm cache) and requires identical bytes;
+3. runs the organisers' `validate_submission.py`;
+4. requires the same bytes as this checkout's own output (and `EXPECTED_SHA256` if set);
+5. downloads the Metrica data and retrains the control model, which must equal `models/control_v1.json` byte for byte;
+6. runs the whole test suite.
+
+First run (Nov 1): 72 files, all six checks pass, and all 68 tests run in the copy (none skipped). Running it caught a regression from adding the feature-drop option for the ablation: boolean column indexing in `control.train` gave a non-contiguous array. That changed the BLAS summation order and the last bits of the weights, so the shipped model no longer regenerated byte for byte. Fixed with `np.ascontiguousarray`; the BAR-ATH output was unaffected.
+
+Re-freeze (Nov 1, after the label fix): 75 files, all six checks pass with `EXPECTED_SHA256=46fa8c61…`, and the control model retrained in the copy equals the shipped one byte for byte. All tests run in the copy (80 at the time).
+
+### What the ablation says ([`docs/ABLATION.md`](ABLATION.md))
+
+Held-out, degraded, 3 games × 3 seeds, corrected labels, decoder settings fixed at v2's (switch 50):
+
+- **Stages:** the dead-ball stage is worth +0.084 spellF1 (baseline 0.372 → v1 0.456). The learned control model is worth +0.264 (→ v2 0.720).
+- **The Nov 1 decoder (switch 25):** −0.024 [−0.031, −0.018]. This is the evidence for the re-freeze.
+- **Every control feature group now matters** (all intervals exclude 0):
+
+  | without | Δ spellF1 |
+  |---|---|
+  | temporal context | −0.086 |
+  | look-ahead | −0.037 |
+  | carry | −0.029 |
+  | ball direction | −0.019 |
+  | proximity | −0.013 |
+  | team shape | −0.008 |
+
+  On the old labels, carry and team shape were indistinguishable from zero. They lost to one-touch plays that were labelled as possessions.
+- **The 1 s minimum stoppage is now essential:** −0.054 [−0.063, −0.044]. At switch 50, a turnover through a short fake D is much cheaper than a switch, and `viterbi_min_dead` is what closes that route.
+- **Indistinguishable from zero:** restart-team evidence, +0.001 [−0.002, +0.004]. The external games have no Smart Tagging, so the part of it that comes from the tags can only matter on BAR-ATH, and the harness cannot measure that.
+- **Noise floor:** v2's spread across degradation seeds is 0.004. A config difference below ~0.01 means nothing without a paired interval.
+- **Clean tracking is worth +0.057.** That is roughly the most this pipeline can gain from better input. It matters for the Nov 8 go/no-go on video ball detection, which can recover only part of that gap.
+
+Nothing was removed. Every component either helps or is within noise.
+
+## Workstreams (5 people)
+
+| who | owns | next deliverable |
+|---|---|---|
+| **P1 Platform & decoder** | platform, `decode.py`, final assembly, reproducibility | H/A duration priors (HSMM); event-snapping hooks |
+| **P2 Dead ball** | `io_tagging`, `ball` (cleaning), `deadball`, `hmm2`, `restart` | Anchors + EM HMM + refined stoppages + restart team |
+| **P3 Ball & control** | `ball` (touches, aerial), `control` | H↔A boundary timing: touch events, snapping boundaries (2–8 s possessions) |
+| **P4 External validation** | `external`, `degrade`, `eval_external`, `tune`; the hyperparameter search | P2 thresholds + stop/restart penalties via the `tune.py` pattern; live-play ball dropout in `degrade.py` |
+| **P5 Ball-free + stretch** | `shape`, `tag_prior`; stretch | Pseudo-label set + shape classifier (critical: the ball is missing in long blocks) |
+
+Everyone writes the tech-doc section for their own module. P1 compiles it.
+
+## Milestones
+
+- **M0, Nov 1–2.** ✅ Skeleton, interfaces and baseline parity; `.cache/` gitignored. Still to do: rename the tactical mp4 to `data/tactical/BAR-ATH_tactical.mp4`, and make sure `origin` (`meroo893/more-than-a-hack-2027`) is public before submitting.
+- **M1, Nov 3–6.** v1 of every module; first fused submission; external harness running.
+- **M2, Nov 7–11.** HSMM durations, boundary snapping, restart logic, the shape model, fusion weights tuned externally. **Nov 8 go/no-go for the stretch work.**
+- **M3, Nov 12–14.** Feature freeze; ablation table for the doc (external harness); reproducibility check from a clean clone. ✅ The tooling is done and passes on v2 (Nov 1). At the real freeze: commit, then rerun `ablate` and `scripts/check_reproducibility.sh --head`, and record the hash.
+- **M4, Nov 15–16.** Final `<team>.csv` + tech doc; validate; **submit Nov 16**.
+
+## Stretch (P5 after M1, gated at Nov 8)
+
+1. **Video ball detection on the tactical mp4, local GPU only.** The T&Cs forbid uploading the match video to cloud LLMs, and cloud compute is a grey area. Use a public detector trained on other games, and run it only on graded frames with no ball. Back-project to the pitch with `load_homography.unproject`, and keep a detection only if it is consistent with the trajectory. Drop the idea if it recovers less than ~20% of the gaps or shows no gain.
+2. **Broadcast replay segments as a stoppage signal.** Only if time allows. It needs the broadcast aligned to tactical by matching the two ATDs.
+
+## Verification
+
+1. `uv run pytest -q`. It covers loader alignment, the published coverage numbers, attack direction, a bit-exact baseline port, the writer refusing graded `X`, and the decoder on synthetic data.
+2. **Decision metric:** `uv run more-than-a-hack-2027 eval-external` (P4), against the baseline on degraded games; settings chosen with `eval_external.logo_search`.
+3. **Submission:** `predict --out evaluation/results/<team>.csv`, then `python evaluation/validate_submission.py evaluation/results/<team>.csv`. Expect OK, 199,319 rows, a plausible possession count, and no graded `X`.
+4. **Public check (correctness only):** `uv run python evaluation/run_evaluation.py --bootstrap 1000`.
+5. **Reproducibility:** `scripts/check_reproducibility.sh` (`--head` after committing). It runs a fresh copy plus the data bundle, then `uv sync && predict` twice, validate, the model retrain and the tests, and requires identical sha256.
+6. **No leaks:** the same script fails if the published files include `data/`, `.cache/`, private GT, submission CSVs or derived tracking exports.
+7. **Ablation:** `uv run more-than-a-hack-2027 ablate --out docs/ABLATION.md` regenerates the table byte for byte.
+8. **Tuning:** `uv run more-than-a-hack-2027 tune --out docs/TUNING.md` regenerates the decoder choice byte for byte; `pipeline.V2_DEFAULTS` must match its "Chosen" line.

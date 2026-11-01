@@ -62,3 +62,9 @@ __pycache__/
 venv/
 env/
 .DS_Store
+
+# -- team pipeline -----------------------------------------------------------------------------
+# Parsed tracking caches and downloaded external datasets. Derived from the gated data (or from
+# third-party data), so never committed.
+.cache/
+.pytest_cache/
