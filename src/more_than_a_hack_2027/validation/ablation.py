@@ -16,7 +16,8 @@ with the same draws for every row and seed, so the noise the rows share cancels 
 The v3 rows (the sequence model) decode held-out log-probabilities computed on a Kaggle GPU:
 `scripts/kaggle_seq.py v3-heldout` writes lp_seq_v3_*.npz, kept in .cache/seq_heldout/ (each game
 predicted by networks trained on the other two). They are decoded at pipeline.V3_DEFAULTS. Without
-those files the v3 rows are left out.
+those files the v3 rows are left out. Row v3-nov2 reads the runs of the Nov 2 recipe, renamed
+lp_seq_v3_nov2_*.npz when the recipe changed.
 """
 
 import os
@@ -36,6 +37,9 @@ import possession_metrics as pm  # noqa: E402
 REFERENCE = "v2"
 HELDOUT_DIR = os.path.join(CACHE_DIR, "seq_heldout")
 V3_MEMBERS = tuple("seq_v3_s{}".format(s) for s in range(7)) + ("seq_v3_own",)
+# v3 as frozen on Nov 2, before the DFL and SkillCorner inputs showed the ball while dead: the same
+# runs, kept as lp_seq_v3_nov2_*.npz
+V3_NOV2_MEMBERS = tuple(name.replace("seq_v3_", "seq_v3_nov2_") for name in V3_MEMBERS)
 
 
 def feature_groups(cfg=None):
@@ -86,6 +90,8 @@ ROWS = (
         section="Reference"),
     Row("nov1", "decoder as frozen on Nov 1 (w_control 1.6, switch 25, tuned on the older labels)",
         "v2", cfg={"w_control": 1.6, "switch": 25.0}, section="Reference"),
+    Row("v3-nov2", "v3 as frozen on Nov 2 (DFL and SkillCorner inputs hide the ball while dead)",
+        "v3", logprobs=V3_NOV2_MEMBERS, section="Reference"),
 )
 
 
