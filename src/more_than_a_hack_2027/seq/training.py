@@ -46,18 +46,23 @@ TRAIN_DEFAULTS = {
 CACHE_DIR = os.path.join(_paths.CACHE_DIR, "seq_inputs")
 
 
-def game_inputs(seed, game):
+def input_name(base, touch=False):
+    """Cache file name of a set of inputs: with the touch blocks, "<base>_t.npz"."""
+    return "{}{}.npz".format(base, "_t" if touch else "")
+
+
+def game_inputs(seed, game, touch=False):
     """(X, swap_sign, labels, graded, halves) for one degraded Metrica game, cached on disk."""
     from ..validation import harness
     os.makedirs(CACHE_DIR, exist_ok=True)
-    path = os.path.join(CACHE_DIR, "s{}_g{}.npz".format(seed, game))
+    path = os.path.join(CACHE_DIR, input_name("s{}_g{}".format(seed, game), touch))
     if os.path.exists(path):
         z = np.load(path)
         return (z["X"], z["swap_sign"], z["labels"], z["graded"],
                 tuple(tuple(int(v) for v in row) for row in z["halves"]))
     loaded = harness.load_games((game,), ("degraded",), degrade_cfg={"seed": seed})
     eg = loaded[(game, "degraded")]
-    X, swap_sign = network.inputs(eg.ctx)
+    X, swap_sign = network.inputs(eg.ctx, touch=touch)
     graded = eg.ctx.half_of_frame > 0
     np.savez(path, X=X, swap_sign=swap_sign, labels=eg.labels, graded=graded,
              halves=np.array(eg.ctx.halves))
@@ -246,7 +251,8 @@ def train(blocks, cfg=None, log=print, meta=None, device="cpu"):
     weights = {k: v.detach().cpu().numpy().astype(np.float64)
                for k, v in net.state_dict().items()}
     arch = {"stride": cfg["stride"], "channels": cfg["channels"],
-            "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"]), "heads": heads}
+            "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"]), "heads": heads,
+            "touch": network.has_touch(cin)}
     info = {k: (list(v) if isinstance(v, tuple) else v) for k, v in cfg.items()}
     info.update(meta or {})
     return network.SeqModel(arch, scale, weights, info)

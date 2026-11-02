@@ -195,7 +195,8 @@ def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
     model = model if model is not None else network.SeqModel.from_json()
     ball = clean_ball(ctx, stages["ball"])
     dead = deadball.detect(ctx, ball, stages["deadball"])
-    X, swap_sign = network.inputs(ctx, ball, dead, stages["control"])
+    X, swap_sign = network.inputs(ctx, ball, dead, stages["control"],
+                                  touch=bool(model.arch.get("touch")))
     lp = network.logprobs(ctx, model, X, swap_sign)
     graded = ctx.half_of_frame > 0
     evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)

@@ -189,7 +189,7 @@ def _cmd_train_seq(args):
     from .seq import network, training
 
     warnings.simplefilter("ignore", RuntimeWarning)
-    blocks = [training.game_inputs(s, g) for s in args.seeds for g in args.games]
+    blocks = [training.game_inputs(s, g, touch=args.touch) for s in args.seeds for g in args.games]
     model = training.train(blocks, meta={"games": list(args.games), "seeds": list(args.seeds),
                                          "variant": "degraded"})
     model.to_json(args.out)
@@ -207,7 +207,8 @@ def _cmd_dfl_inputs(args):
     missing = harness._competition_missing_counts()
     for match_id in args.matches or dfl.MATCHES:
         for seed in args.seeds:
-            print(dfl.build_inputs(match_id, seed, missing_counts=missing, labels=args.labels))
+            print(dfl.build_inputs(match_id, seed, missing_counts=missing, labels=args.labels,
+                                   touch=args.touch))
     return 0
 
 
@@ -222,7 +223,7 @@ def _cmd_skillcorner_inputs(args):
     for match_id in args.matches or skillcorner.match_ids():
         for seed in args.seeds:
             print(skillcorner.build_inputs(match_id, seed, missing_counts=missing,
-                                           labels=args.labels), flush=True)
+                                           labels=args.labels, touch=args.touch), flush=True)
     return 0
 
 
@@ -315,6 +316,7 @@ def build_parser():
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5],
                    help="degradation seeds")
     p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
+    p.add_argument("--touch", action="store_true", help="add the touch inputs")
     p.set_defaults(func=_cmd_train_seq)
 
     p = sub.add_parser("dfl-inputs",
@@ -323,6 +325,7 @@ def build_parser():
     p.add_argument("--labels", default="control", choices=("flag", "control"),
                    help="DFL's per-touch flag, or the flag filtered by control events")
     p.add_argument("--matches", nargs="+", default=None, help="default: all seven")
+    p.add_argument("--touch", action="store_true", help="add the touch inputs (files *_t)")
     p.set_defaults(func=_cmd_dfl_inputs)
 
     p = sub.add_parser("skillcorner-inputs",
@@ -332,6 +335,7 @@ def build_parser():
     p.add_argument("--labels", default="phase", choices=("phase", "control"),
                    help="SkillCorner's phases of play, or with the one-touch rule on top")
     p.add_argument("--matches", nargs="+", type=int, default=None, help="default: all twenty")
+    p.add_argument("--touch", action="store_true", help="add the touch inputs (files *_t)")
     p.set_defaults(func=_cmd_skillcorner_inputs)
 
     p = sub.add_parser("tune-seq",

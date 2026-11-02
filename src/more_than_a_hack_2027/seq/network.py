@@ -16,6 +16,12 @@ Inputs (`inputs`), every frame, all computed inside one half:
     dead      deadball.py's GT-free outputs (HMM posterior, stoppages, anchors, ball-out
               episodes) and windowed team-speed / ball-visibility statistics
     control   control.py's 18 antisymmetric features (0 where the ball is unseen)
+    touch     optional (`touch=True`, models with arch["touch"]): per team, the spells in which
+              one of its players is the ball's owner -- the player closest to the ball, within
+              2 m -- followed by track identity, so a player who keeps the ball is told apart
+              from a string of different players or a deflection: the current spell's length,
+              time since the last spell and until the next, their lengths, and how many of the
+              team's players owned the ball within +-3 s. Two blocks (home, away) at the end.
 
 Team symmetry. `swap` maps the inputs to the same frame with the teams exchanged (and the pitch
 rotated 180 degrees). Training sees both copies, and prediction averages the model on the frame and
@@ -230,10 +236,11 @@ def geometry_inputs(ctx, ball):
     return np.column_stack([ball_cols, home, away])
 
 
-def inputs(ctx, ball=None, dead=None, control_cfg=None):
+def inputs(ctx, ball=None, dead=None, control_cfg=None, touch=False):
     """(n, C) float32 model inputs, and the per-channel swap signs (C,).
 
-    Layout: ball | home | away | dead (team-free) | control (antisymmetric).
+    Layout: ball | home | away | dead (team-free) | control (antisymmetric), then with
+    touch=True: home touch | away touch.
     """
     from ..stages import control, deadball
     from ..stages.ball import clean_ball
@@ -246,7 +253,121 @@ def inputs(ctx, ball=None, dead=None, control_cfg=None):
     X = np.column_stack([geo, np.nan_to_num(dead_x), ctrl]).astype(np.float32)
     swap_sign = np.concatenate([BALL_SWAP, TEAM_SWAP, TEAM_SWAP,
                                 np.ones(dead_x.shape[1]), -np.ones(ctrl.shape[1])])
+    if touch:
+        if X.shape[1] != N_BASE:
+            raise ValueError("touch inputs need the {}-channel base layout, got {}"
+                             .format(N_BASE, X.shape[1]))
+        X = np.column_stack([X, touch_inputs(ctx, ball)]).astype(np.float32)
+        swap_sign = np.concatenate([swap_sign, np.ones(2 * TOUCH_BLOCK)])
     return X, swap_sign
+
+
+def has_touch(n_channels):
+    return n_channels == N_BASE + 2 * TOUCH_BLOCK
+
+
+# -- touch inputs -------------------------------------------------------------------------------
+
+N_BASE = 111               # channels without the touch blocks (checked in `inputs`)
+TOUCH_BLOCK = 6
+TOUCH_RADIUS_M = 2.0       # the ball's owner is the closest player within this distance
+TOUCH_GAP = 5              # frames an owner may drop out (a ball flicker) inside one spell
+TOUCH_WINDOW_S = 3.0       # distinct owners counted within +- this
+
+
+def ball_owner(ctx, ball, radius=TOUCH_RADIUS_M, gap=TOUCH_GAP):
+    """(n,) slot of the player closest to the ball when within `radius`, else -1. A gap of at
+    most `gap` frames between two frames owned by the same slot is filled."""
+    n = ctx.n_frames
+    pos = ball.pos
+    with np.errstate(invalid="ignore"):
+        d = np.hypot(ctx.xy[..., 0] - pos[:, 0:1], ctx.xy[..., 1] - pos[:, 1:2])
+    d = np.where(np.isnan(d), np.inf, d)
+    j = np.argmin(d, axis=1)
+    owner = np.where(d[np.arange(n), j] <= radius, j, -1)
+    graded = np.zeros(n, bool)
+    for _, first, last in ctx.halves:
+        graded[first:last + 1] = True
+        seg = owner[first:last + 1]
+        idx = np.flatnonzero(seg >= 0)
+        if len(idx) < 2:
+            continue
+        holes = np.flatnonzero((np.diff(idx) > 1) & (np.diff(idx) <= gap + 1)
+                               & (seg[idx[:-1]] == seg[idx[1:]]))
+        for k in holes:
+            seg[idx[k] + 1:idx[k + 1]] = seg[idx[k]]
+    owner[~graded] = -1
+    return owner
+
+
+def _owner_runs(owner):
+    """[(start, stop, slot)] maximal runs of one owner (slot >= 0)."""
+    edges = np.flatnonzero(np.diff(owner) != 0) + 1
+    bounds = np.concatenate(([0], edges, [len(owner)]))
+    return [(int(a), int(b), int(owner[a])) for a, b in zip(bounds[:-1], bounds[1:])
+            if owner[a] >= 0]
+
+
+def _team_touch(owner_seg, team_of_slot, team, fps):
+    """(m, TOUCH_BLOCK) for one team inside one half."""
+    m = len(owner_seg)
+    runs = [r for r in _owner_runs(owner_seg) if team_of_slot[r[2]] == team]
+    cur = np.zeros(m)
+    end_len = np.full(m, np.nan)        # run length placed at the frame its run ends
+    start_len = np.full(m, np.nan)      # ... and at the frame it starts
+    ends = np.zeros(m, bool)
+    starts = np.zeros(m, bool)
+    inside = np.zeros(m, bool)
+    for a, b, _ in runs:
+        length = (b - a) / fps
+        cur[a:b] = length
+        inside[a:b] = True
+        if b < m:
+            end_len[b] = length
+            ends[b] = True
+        start_len[a] = length
+        starts[a] = True
+    idx = np.arange(m)
+    last_end = np.maximum.accumulate(np.where(ends, idx, -10 ** 9))
+    since = np.where(inside, 0.0, (idx - last_end) / fps)
+    nxt = np.minimum.accumulate(np.where(starts, idx, 10 ** 9)[::-1])[::-1]
+    until = np.where(inside, 0.0, (nxt - idx) / fps)
+    last_len = pd.Series(end_len).ffill().fillna(0.0).to_numpy()
+    following = pd.Series(start_len).bfill().to_numpy()
+    next_len = np.r_[following[1:], np.nan]
+    next_len = np.where(np.isnan(next_len), 0.0, next_len)
+    # distinct owners of this team within +-TOUCH_WINDOW_S
+    w = int(TOUCH_WINDOW_S * fps)
+    distinct = np.zeros(m)
+    for slot in sorted({r[2] for r in runs}):
+        own = np.zeros(m + 1)
+        for a, b, s in runs:
+            if s == slot:
+                own[a + 1:b + 1] = 1.0
+        c = np.cumsum(own)
+        lo = np.clip(idx - w, 0, m)
+        hi = np.clip(idx + w + 1, 0, m)
+        distinct += (c[hi] - c[lo]) > 0
+    return np.column_stack([
+        np.minimum(cur, 6.0) / 4.0,
+        np.minimum(since, 5.0) / 5.0,
+        np.minimum(until, 5.0) / 5.0,
+        np.minimum(last_len, 6.0) / 4.0,
+        np.minimum(next_len, 6.0) / 4.0,
+        np.minimum(distinct, 6.0) / 3.0,
+    ])
+
+
+def touch_inputs(ctx, ball):
+    """(n, 2 * TOUCH_BLOCK): the home touch block, then the away one (0 outside the halves)."""
+    owner = ball_owner(ctx, ball)
+    out = np.zeros((ctx.n_frames, 2 * TOUCH_BLOCK))
+    for _, first, last in ctx.halves:
+        seg = owner[first:last + 1]
+        for k, team in enumerate((HOME, AWAY)):
+            out[first:last + 1, k * TOUCH_BLOCK:(k + 1) * TOUCH_BLOCK] = _team_touch(
+                seg, ctx.team_of_slot, team, ctx.fps)
+    return out
 
 
 def flip_sign(n_channels):
@@ -262,6 +383,9 @@ def swap(X, swap_sign):
     b = a + TEAM_BLOCK
     c = b + TEAM_BLOCK
     out[:, a:b], out[:, b:c] = out[:, b:c].copy(), out[:, a:b].copy()
+    if has_touch(X.shape[1]):
+        d = N_BASE + TOUCH_BLOCK
+        out[:, N_BASE:d], out[:, d:] = out[:, d:].copy(), out[:, N_BASE:d].copy()
     return out
 
 

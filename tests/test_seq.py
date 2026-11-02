@@ -204,3 +204,54 @@ def test_with_aux_until_zero_the_auxiliary_rows_are_never_drawn(tmp_path, monkey
     mixed = training.train([_training_block(0)], dict(cfg, aux=("b.npz",), aux_until=1.0),
                            log=None)
     assert any(not np.array_equal(one.weights[k], mixed.weights[k]) for k in one.weights)
+
+
+def _spells_match(synthetic):
+    """Ball on the centre spot. Home slot 0 holds it 1-3 s, away slot 10 touches it 4.0-4.4 s,
+    home slot 1 holds it 6-8 s; a 3-frame ball flicker inside the first spell."""
+    from types import SimpleNamespace
+    n = 250
+    ctx = synthetic(n)
+    xy = np.array(ctx.xy)
+    centre = np.array([52.5, 34.0])
+    for slot, a, b in ((0, 25, 75), (10, 100, 110), (1, 150, 200)):
+        xy[a:b, slot] = centre + [0.5, 0.0]
+    from more_than_a_hack_2027.data.context import Context
+    ctx = Context(**{**ctx.__dict__, "xy": xy})
+    pos = np.tile(centre, (n, 1))
+    pos[50:53] = np.nan
+    return ctx, SimpleNamespace(pos=pos)
+
+
+def test_touch_inputs_follow_each_players_spell_with_the_ball(synthetic):
+    ctx, ball = _spells_match(synthetic)
+    owner = network.ball_owner(ctx, ball)
+    assert (owner[25:75] == 0).all()                       # the flicker is filled
+    assert (owner[100:110] == 10).all() and (owner[150:200] == 1).all()
+    t = network.touch_inputs(ctx, ball)
+    home, away = t[:, :network.TOUCH_BLOCK], t[:, network.TOUCH_BLOCK:]
+    cur, since, until, last_len, next_len, distinct = home.T
+    assert cur[50] == pytest.approx(2.0 / 4) and away[105, 0] == pytest.approx(0.4 / 4)
+    assert since[125] == pytest.approx(2.0 / 5) and until[125] == pytest.approx(1.0 / 5)
+    assert last_len[125] == pytest.approx(2.0 / 4) and next_len[125] == pytest.approx(2.0 / 4)
+    assert distinct[110] == pytest.approx(2 / 3) and distinct[240] == pytest.approx(1 / 3)
+    assert since[10] == 1.0 and last_len[10] == 0.0       # nothing before the first spell
+
+
+def test_touch_blocks_trade_places_under_the_team_swap(synthetic):
+    ctx, xy = _moving_match(synthetic)
+    from more_than_a_hack_2027.data.context import Context
+    ctx = Context(**{**ctx.__dict__, "xy": xy})
+    other = _rotated_and_swapped(ctx, xy)
+    t = network.touch_inputs(ctx, clean_ball(ctx))
+    t_other = network.touch_inputs(other, clean_ball(other))
+    k = network.TOUCH_BLOCK
+    np.testing.assert_allclose(t[:, :k], t_other[:, k:])
+    np.testing.assert_allclose(t[:, k:], t_other[:, :k])
+    X = np.random.RandomState(0).randn(50, network.N_BASE + 2 * k)
+    geo = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
+    sign = np.r_[network.BALL_SWAP, network.TEAM_SWAP, network.TEAM_SWAP,
+                 -np.ones(network.N_BASE - geo), np.ones(2 * k)]
+    swapped = network.swap(X, sign)
+    np.testing.assert_allclose(swapped[:, network.N_BASE:network.N_BASE + k], X[:, -k:])
+    np.testing.assert_allclose(network.swap(swapped, sign), X)

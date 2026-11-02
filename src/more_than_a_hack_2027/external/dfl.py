@@ -277,13 +277,14 @@ def control_labels(match_id, log=None):
     return filter_switches(flag, [f for f, _ in marks], [k for _, k in marks]).astype(np.int8)
 
 
-def input_file(match_id, seed, labels="flag"):
+def input_file(match_id, seed, labels="flag", touch=False):
     """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux":
-    dfl_* (flag labels) or dflc_* (control labels)."""
-    return "{}_{}_s{}.npz".format(LABEL_KINDS[labels], match_id, seed)
+    dfl_* (flag labels) or dflc_* (control labels); *_t with the touch inputs."""
+    from ..seq.training import input_name
+    return input_name("{}_{}_s{}".format(LABEL_KINDS[labels], match_id, seed), touch)
 
 
-def build_inputs(match_id, seed, missing_counts=None, labels="flag"):
+def build_inputs(match_id, seed, missing_counts=None, labels="flag", touch=False):
     """Degrade one match like the external games and cache network inputs + labels
     (labels: "flag" or "control", see the module docstring)."""
     from . import degrade, metrica
@@ -292,7 +293,7 @@ def build_inputs(match_id, seed, missing_counts=None, labels="flag"):
     from ..seq.training import CACHE_DIR as INPUT_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels))
+    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels, touch))
     if os.path.exists(path):
         return path
     if missing_counts is None:
@@ -305,7 +306,7 @@ def build_inputs(match_id, seed, missing_counts=None, labels="flag"):
     graded = ctx.half_of_frame > 0
     codes = flag if labels == "flag" else control_labels(match_id)
     labels = np.where(graded, codes, 3).astype(np.int8)
-    X, swap_sign = network.inputs(ctx)
+    X, swap_sign = network.inputs(ctx, touch=touch)
     np.savez(path, X=X, swap_sign=swap_sign, labels=labels, graded=graded,
              halves=np.array(ctx.halves))
     return path

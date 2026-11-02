@@ -248,13 +248,14 @@ def arrays_and_labels(match_id, labels="phase"):
     return arrays, labels
 
 
-def input_file(match_id, seed, labels="phase"):
+def input_file(match_id, seed, labels="phase", touch=False):
     """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux":
-    sc_* (phase labels) or scc_* (control labels)."""
-    return "{}_{}_s{}.npz".format(LABEL_KINDS[labels], match_id, seed)
+    sc_* (phase labels) or scc_* (control labels); *_t with the touch inputs."""
+    from ..seq.training import input_name
+    return input_name("{}_{}_s{}".format(LABEL_KINDS[labels], match_id, seed), touch)
 
 
-def build_inputs(match_id, seed, missing_counts=None, labels="phase"):
+def build_inputs(match_id, seed, missing_counts=None, labels="phase", touch=False):
     """Degrade one match like the external games and cache network inputs + labels."""
     from . import degrade, metrica
     from ..validation import harness
@@ -262,7 +263,7 @@ def build_inputs(match_id, seed, missing_counts=None, labels="phase"):
     from ..seq.training import CACHE_DIR as INPUT_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels))
+    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels, touch))
     if os.path.exists(path):
         return path
     if missing_counts is None:
@@ -274,7 +275,7 @@ def build_inputs(match_id, seed, missing_counts=None, labels="phase"):
     ctx = metrica.make_context(game, degraded)
     graded = ctx.half_of_frame > 0
     labels = np.where(graded, codes, 3).astype(np.int8)
-    X, swap_sign = network.inputs(ctx)
+    X, swap_sign = network.inputs(ctx, touch=touch)
     np.savez(path, X=X, swap_sign=swap_sign, labels=labels, graded=graded,
              halves=np.array(ctx.halves))
     return path
