@@ -1,7 +1,11 @@
 """Train sequence models (v3) on a Kaggle GPU: held-out runs for evaluation, or the shipped ones.
 
     uv run python scripts/kaggle_seq.py v3-final --push      # the shipped ensemble (models/seq_v3_*)
+    uv run python scripts/kaggle_seq.py v3-heldout-01 --push # held-out runs of members s0 and s1
     uv run python scripts/kaggle_seq.py dbv-atd-01 --push    # the dead-ball view experiment
+
+v3-MODE[-MEMBERS] trains the v3 recipe's members (digits: training seeds, "o": the own-head
+variant; all eight when omitted) in mode "final" or "heldout".
     uv run python scripts/kaggle_seq.py NAME JOBS_JSON [--push] [--cpu]
 
 Why Kaggle: training one network takes ~5 min on a T4 and far longer on a laptop CPU. Only the
@@ -52,22 +56,30 @@ DATASETS = [USER + "/mtah-seq-inputs", USER + "/mtah-seq-dflc-extra", USER + "/m
 # The shipped v3 recipe (docs/TUNING_V3.md): the Metrica games plus the open DFL (control labels,
 # 6 degradation seeds) and SkillCorner (one-touch labels, 3 seeds) matches on the main head, half
 # of every batch, with the touch inputs; seven training seeds and one auxiliary-head variant.
+# V3_VIEW is how those matches show the ball while it is dead: "atd" replays the competition ATD's
+# stoppages (external/degrade.py, dead_ball_view), as chosen by the dead-ball view experiment
+# below; "edges" hides it except at the edges, the recipe frozen on 2026-11-02.
 V3_RECIPE = {"short_weight": 2.0, "turn_weight": 1.0, "steps": 3200, "aux_head": "main"}
 V3_SEEDS = (0, 1, 2, 3, 4, 5, 6)
+V3_VIEW = "atd"
 
 
-def v3_jobs(mode="final"):
+def v3_jobs(mode="final", members=None, view=V3_VIEW):
     sys.path.insert(0, os.path.join(REPO, "src"))
     from more_than_a_hack_2027.external import dfl, skillcorner
-    from more_than_a_hack_2027.seq.training import input_name
-    aux = [input_name("dflc_{}_s{}".format(m, s), True) for m in dfl.MATCHES for s in range(6)]
-    aux += [input_name("scc_{}_s{}".format(m, s), True)
+    aux = [dfl.input_file(m, s, "control", True, view) for m in dfl.MATCHES for s in range(6)]
+    aux += [skillcorner.input_file(m, s, "control", True, view)
             for m in skillcorner.match_ids() for s in range(3)]
     cfg = dict(V3_RECIPE, aux=aux)
     jobs = [{"tag": "seq_v3_s{}".format(s), "touch": True, "mode": mode,
              "cfg": dict(cfg, seed=s)} for s in V3_SEEDS]
     jobs.append({"tag": "seq_v3_own", "touch": True, "mode": mode,
                  "cfg": dict(cfg, aux_head="own")})
+    if members is not None:
+        keep = {"seq_v3_" + ("own" if c == "o" else "s" + c) for c in members}
+        jobs = [j for j in jobs if j["tag"] in keep]
+        if len(jobs) != len(keep):
+            raise SystemExit("unknown v3 members: " + members)
     return jobs
 
 
@@ -254,8 +266,9 @@ def build(name, jobs, device="cuda"):
 
 def main(argv):
     name = argv[0]
-    if name.startswith("v3-"):
-        jobs = v3_jobs(name[len("v3-"):])
+    if name.startswith("v3-"):                     # v3-<final|heldout>[-<members>], e.g. v3-heldout-01
+        mode, _, members = name[len("v3-"):].partition("-")
+        jobs = v3_jobs(mode, members or None)
     elif name.startswith("dbv-"):                  # dbv-<edges|atd>-<seed digits>, e.g. dbv-atd-01
         _, arm, digits = name.split("-")
         jobs = view_jobs(arm, [int(c) for c in digits])
