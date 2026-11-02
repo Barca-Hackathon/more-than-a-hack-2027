@@ -212,12 +212,26 @@ def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
         calls = restart.decide(ctx, dead, tags, stages["restart"])
         evidence[:, :2] += top["w_restart"] * restart.frame_evidence(ctx, calls, stages["restart"])
 
-    trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
-    labels = decode.decode_match(evidence, ctx.halves, trans,
-                                 min_dead=int(round(top["min_dead_s"] * ctx.fps)))
+    labels = _decode_v3(ctx, evidence, top)
     if return_parts:
         return labels, {"dead": dead, "calls": calls, "evidence": evidence, "logprobs": lp}
     return labels
+
+
+def _decode_v3(ctx, evidence, top):
+    trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
+    return decode.decode_match(evidence, ctx.halves, trans,
+                               min_dead=int(round(top["min_dead_s"] * ctx.fps)))
+
+
+def v3_from_logprobs(ctx, lp, cfg=None):
+    """v3's labels from precomputed (n, 3) log-probabilities (e.g. held-out ones made on a GPU);
+    the same decoder as run_v3. Restart evidence needs the dead-ball stage, so it is refused."""
+    top, _ = split_cfg(cfg, V3_DEFAULTS)
+    if top["w_restart"]:
+        raise ValueError("v3_from_logprobs has no restart evidence: set w_restart to 0")
+    graded = ctx.half_of_frame > 0
+    return _decode_v3(ctx, np.where(graded[:, None], top["w_seq"] * lp, 0.0), top)
 
 
 # The frozen submission method (docs/PLAN.md, M3). `predict` without --method runs this, and

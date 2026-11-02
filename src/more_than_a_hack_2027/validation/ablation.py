@@ -12,21 +12,30 @@ with re-tuned penalties, so read each drop as an upper bound on what that part i
 Is a gap real? The interval is a paired bootstrap of the difference from v2. It uses the official
 scorer's resampling unit (whole ground-truth possessions, possession_metrics.bootstrap_spell_f1),
 with the same draws for every row and seed, so the noise the rows share cancels out.
+
+The v3 rows (the sequence model) decode held-out log-probabilities computed on a Kaggle GPU:
+`scripts/kaggle_seq.py v3-heldout` writes lp_seq_v3_*.npz, kept in .cache/seq_heldout/ (each game
+predicted by networks trained on the other two). They are decoded at pipeline.V3_DEFAULTS. Without
+those files the v3 rows are left out.
 """
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
+from .. import pipeline
 from ..stages import control
 from . import harness
-from .._paths import ensure_repo_on_path
+from .._paths import CACHE_DIR, ensure_repo_on_path
 
 ensure_repo_on_path()
 import possession_metrics as pm  # noqa: E402
 
 REFERENCE = "v2"
+HELDOUT_DIR = os.path.join(CACHE_DIR, "seq_heldout")
+V3_MEMBERS = tuple("seq_v3_s{}".format(s) for s in range(7)) + ("seq_v3_own",)
 
 
 def feature_groups(cfg=None):
@@ -52,6 +61,7 @@ class Row:
     drop: str = ""                  # a feature_groups() key, retrained without it
     variant: str = "degraded"
     section: str = ""
+    logprobs: tuple = ()            # v3: held-out log-prob files (HELDOUT_DIR/lp_<name>.npz)
 
 
 ROWS = (
@@ -59,8 +69,12 @@ ROWS = (
         section="Pipeline, one stage at a time"),
     Row("v1", "+ dead-ball and restart stages, segment decoder (nearest-player team evidence)",
         "v1", section="Pipeline, one stage at a time"),
-    Row("v2", "+ learned control model (**current submission**)", "v2",
+    Row("v2", "+ learned control model (v2, the reference)", "v2",
         section="Pipeline, one stage at a time"),
+    Row("v3", "v3: sequence-model ensemble, 8 networks (**current submission**)", "v3",
+        logprobs=V3_MEMBERS, section="Pipeline, one stage at a time"),
+    Row("v3-one", "v3 with one network instead of 8 (training seed 0)", "v3",
+        logprobs=V3_MEMBERS[:1], section="Pipeline, one stage at a time"),
     Row("-restart", "no restart-team evidence", "v2", cfg={"w_restart": 0.0},
         section="v2 with one part removed"),
     Row("-min_dead", "no 1 s minimum stoppage in the decoder", "v2", cfg={"min_dead_s": 0.0},
@@ -96,9 +110,38 @@ def _spell_f1_draws(flags, n_pred, picks):
     return f1.mean(axis=0)
 
 
-def run(seeds=(0, 1, 2), games=(1, 2, 3), rows=ROWS, draws=1000, log=print):
+def _lp_paths(row):
+    return [os.path.join(HELDOUT_DIR, "lp_{}.npz".format(name)) for name in row.logprobs]
+
+
+def available(rows=ROWS, log=print):
+    """The rows that can run: v3 rows need their held-out log-prob files."""
+    out = []
+    for row in rows:
+        missing = [p for p in _lp_paths(row) if not os.path.exists(p)]
+        if missing:
+            if log:
+                log("skipping row {}: no {} (scripts/kaggle_seq.py v3-heldout)".format(
+                    row.key, missing[0]))
+            continue
+        out.append(row)
+    return tuple(out)
+
+
+def _v3_method(lp):
+    def method(ctx, cfg):
+        if len(lp) != ctx.n_frames:
+            raise ValueError("held-out log-probs do not match the game's frames")
+        return pipeline.v3_from_logprobs(ctx, lp, cfg)
+    return method
+
+
+def run(seeds=(0, 1, 2), games=(1, 2, 3), rows=None, draws=1000, log=print):
     """(per-run DataFrame, summary DataFrame). One run = (row, seed, game)."""
+    from ..seq import tuning
+    rows = available(log=log) if rows is None else rows
     groups = feature_groups()
+    lps = {row.key: tuning.load_logprobs(_lp_paths(row)) for row in rows if row.logprobs}
     records, flags = [], {}
     for seed in seeds:
         variants = tuple(sorted({row.variant for row in rows} | {"degraded"}))
@@ -108,10 +151,13 @@ def run(seeds=(0, 1, 2), games=(1, 2, 3), rows=ROWS, draws=1000, log=print):
             if row.method in harness.TRAINED and row.drop not in models:
                 models[row.drop] = harness.logo_models(
                     loaded, drop=tuple(groups[row.drop]) if row.drop else ())
-            method = harness.METHODS[row.method]
             for game in games:
                 eg = loaded[(game, row.variant)]
                 cfg = dict(row.cfg)
+                if row.logprobs:
+                    method = _v3_method(lps[row.key][(seed, game)])
+                else:
+                    method = harness.METHODS[row.method]
                 if row.method in harness.TRAINED:
                     cfg["model"] = models[row.drop][game]
                 result, labels = harness.run_one(eg, method, cfg, return_labels=True)
@@ -163,13 +209,15 @@ def markdown(summary, seeds, games, draws):
         "",
         "- **Data:** Metrica Sports sample games {} (github.com/metrica-sports/sample-data), with "
         "Metrica's event data turned into frame labels (a BALL LOST never starts a possession and "
-        "a one-touch recovery is not one; metrica.py). The tracking is degraded to look like the "
+        "a one-touch recovery is not one; external/metrica.py). The tracking is degraded to look like the "
         "competition ATD (ball smoothing and noise, player dropout, track fragmentation), using "
         "{} degradation seeds. No BAR-ATH labels are used anywhere.".format(
             ", ".join(map(str, games)), len(seeds)),
         "- **Held out:** each game is scored by a control model trained without it. The decoder "
-        "settings stay at the v2 choice for every row, so read a drop as an upper bound on what "
-        "the removed part is worth.",
+        "settings stay at the v2 choice for every v2 row, so read a drop as an upper bound on "
+        "what the removed part is worth. The v3 rows decode held-out log-probabilities of "
+        "sequence models trained on the other two games (scripts/kaggle_seq.py v3-heldout, on a "
+        "Kaggle GPU) at v3's decoder settings (docs/TUNING_V3.md).",
         "- **Numbers:** spellF1 and macroF1 are the official metric (evaluation/possession_metrics"
         ".py), averaged over {} games × {} seeds. *seed sd* is the spread of the 3-game mean "
         "across seeds. *90% interval* is a paired bootstrap of the difference from v2 ({} draws "

@@ -289,3 +289,14 @@ def test_ensemble_logprobs_average_the_members_inside_the_halves(synthetic, tmp_
     np.testing.assert_allclose(loaded[1].forward(X), a.forward(X), atol=1e-5)
     with pytest.raises(FileNotFoundError):
         network.load_ensemble(str(tmp_path / "none_*.json"))
+
+
+def test_decoding_saved_logprobs_gives_run_v3s_labels(synthetic):
+    ctx, xy = _moving_match(synthetic, n=600)
+    from more_than_a_hack_2027.data.context import Context
+    ctx = Context(**{**ctx.__dict__, "xy": xy})
+    model = _random_model(network.N_BASE, seed=5)
+    labels, parts = pipeline.run_v3(ctx, return_parts=True, model=[model, model])
+    np.testing.assert_array_equal(pipeline.v3_from_logprobs(ctx, parts["logprobs"]), labels)
+    with pytest.raises(ValueError):
+        pipeline.v3_from_logprobs(ctx, parts["logprobs"], {"w_restart": 1.0})
