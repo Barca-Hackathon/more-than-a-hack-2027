@@ -255,3 +255,13 @@ def test_touch_blocks_trade_places_under_the_team_swap(synthetic):
     swapped = network.swap(X, sign)
     np.testing.assert_allclose(swapped[:, network.N_BASE:network.N_BASE + k], X[:, -k:])
     np.testing.assert_allclose(network.swap(swapped, sign), X)
+
+
+def test_an_ensemble_of_one_is_the_model_and_ensembles_are_normalised():
+    rng = np.random.RandomState(0)
+    lps = [np.log(rng.dirichlet(np.ones(3), size=40)) for _ in range(3)]
+    np.testing.assert_allclose(network.average_logprobs(lps[:1]), lps[0], atol=1e-12)
+    avg = network.average_logprobs(lps)
+    np.testing.assert_allclose(np.exp(avg).sum(axis=1), 1.0)
+    shifted = network.average_logprobs([lp + 5.0 for lp in lps])  # unnormalised members
+    np.testing.assert_allclose(shifted, avg, atol=1e-12)

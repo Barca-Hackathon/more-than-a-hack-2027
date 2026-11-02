@@ -463,6 +463,14 @@ class SeqModel:
                    payload.get("info", {}))
 
 
+def average_logprobs(logprobs_list):
+    """An ensemble's (n, 3) log-probabilities: the mean of its members', renormalised (a
+    normalised geometric mean of the probabilities)."""
+    mean = np.mean([np.asarray(lp, dtype=np.float64) for lp in logprobs_list], axis=0)
+    m = mean.max(axis=1, keepdims=True)
+    return mean - m - np.log(np.exp(mean - m).sum(axis=1, keepdims=True))
+
+
 def logprobs(ctx, model, X, swap_sign):
     """(n, 3) team-symmetric log P(H), log P(A), log P(D) inside the halves, 0 elsewhere."""
     return logprobs_halves(model, X, swap_sign, ctx.halves)

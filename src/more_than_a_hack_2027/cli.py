@@ -234,10 +234,15 @@ def _cmd_tune_seq(args):
 
     warnings.simplefilter("ignore", RuntimeWarning)
     configs = tuning.grid()
-    runs = tuning.run(tuple(args.train_seeds), tuple(args.seeds), tuple(args.games),
-                       configs=configs)
+    note = None
+    if args.logprobs:
+        runs = tuning.score_logprobs(tuning.load_logprobs(args.logprobs), configs)
+        note = args.note
+    else:
+        runs = tuning.run(tuple(args.train_seeds), tuple(args.seeds), tuple(args.games),
+                           configs=configs)
     text = tuning.markdown(runs, configs, tuple(args.train_seeds), tuple(args.seeds),
-                            tuple(args.games), None)
+                            tuple(args.games), None, model_note=note)
     print(text)
     if args.out:
         with open(args.out, "w") as handle:
@@ -345,6 +350,11 @@ def build_parser():
     p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
     p.add_argument("--out", help="write the Markdown table here (e.g. docs/TUNING_V3.md)")
     p.add_argument("--csv", help="also write the per-run scores (keep it in .cache/)")
+    p.add_argument("--logprobs", nargs="+", default=None,
+                   help="score these held-out log-prob files (scripts/kaggle_seq.py), averaged "
+                        "as an ensemble, instead of training locally")
+    p.add_argument("--note", default=None,
+                   help="with --logprobs: the Model line of the report (what made the files)")
     p.set_defaults(func=_cmd_tune_seq)
     return parser
 
