@@ -108,10 +108,13 @@ def _net(cin, cfg, heads=1):
                                       nn.GELU(approximate="tanh"), nn.Conv1d(ch, 3 * heads, 1))
 
         def forward(self, x):
+            # pad to a whole number of strides, as network.SeqModel.forward does
+            n = x.shape[-1]
+            x = F.pad(x, (0, (-n) % self.down.stride[0]))
             h = self.down(x)
             for block in self.blocks:
                 h = block(h)
-            return self.head(self.up(h)[..., :x.shape[-1]] + self.skip(x))
+            return self.head(self.up(h) + self.skip(x))[..., :n]
 
     return Net()
 

@@ -98,19 +98,19 @@ def test_model_round_trips_through_json(tmp_path):
     np.testing.assert_allclose(back.forward(X), model.forward(X), atol=1e-5)
 
 
-def test_numpy_forward_matches_torch():
+@pytest.mark.parametrize("stride", [5, 3])
+def test_numpy_forward_matches_torch(stride):
     torch = pytest.importorskip("torch")
     from more_than_a_hack_2027.seq import training
-    cfg = dict(training.TRAIN_DEFAULTS, channels=16, dilations=(1, 2, 4))
+    cfg = dict(training.TRAIN_DEFAULTS, channels=16, dilations=(1, 2, 4), stride=stride)
     torch.manual_seed(0)
     net = training._net(11, cfg)
     net.eval()
-    X = np.random.RandomState(4).randn(203, 11).astype(np.float32)
+    X = np.random.RandomState(4).randn(203, 11).astype(np.float32)   # not a multiple of either
     with torch.no_grad():
-        x = torch.nn.functional.pad(torch.from_numpy(X.T[None]), (0, (-len(X)) % 5))
-        ref = torch.log_softmax(net(x)[0, :, :len(X)], 0).numpy().T
+        ref = torch.log_softmax(net(torch.from_numpy(X.T[None]))[0], 0).numpy().T
     weights = {k: v.numpy().astype(np.float64) for k, v in net.state_dict().items()}
-    model = network.SeqModel({"stride": 5, "channels": 16, "dilations": [1, 2, 4]},
+    model = network.SeqModel({"stride": stride, "channels": 16, "dilations": [1, 2, 4]},
                               np.ones(11), weights)
     np.testing.assert_allclose(model.forward(X), ref, atol=1e-5)
 
