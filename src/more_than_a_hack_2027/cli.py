@@ -238,7 +238,7 @@ def _cmd_tune_seq(args):
     note = None
     if args.logprobs:
         runs = tuning.score_logprobs(tuning.load_logprobs(args.logprobs), configs)
-        note = args.note
+        note = args.note or tuning.HELDOUT_NOTE
     else:
         runs = tuning.run(tuple(args.train_seeds), tuple(args.seeds), tuple(args.games),
                            configs=configs)
@@ -356,7 +356,8 @@ def build_parser():
                    help="score these held-out log-prob files (scripts/kaggle_seq.py), averaged "
                         "as an ensemble, instead of training locally")
     p.add_argument("--note", default=None,
-                   help="with --logprobs: the Model line of the report (what made the files)")
+                   help="with --logprobs: the Model line of the report (what made the files; "
+                        "default: the v3 held-out files, seq/tuning.HELDOUT_NOTE)")
     p.set_defaults(func=_cmd_tune_seq)
     return parser
 

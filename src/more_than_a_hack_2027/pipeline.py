@@ -173,12 +173,13 @@ def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
 # v3: a learned sequence model (seq/network.py) gives log P(H), log P(A), log P(D) per frame from
 # the tracking geometry, the GT-free dead-ball outputs, the control features and the touch inputs;
 # several such networks can be averaged as an ensemble. The decoder is the same Viterbi with a
-# minimum stoppage length; its settings are chosen held out on the external games.
+# minimum stoppage length; its settings are chosen held out on the external games
+# (docs/TUNING_V3.md).
 V3_DEFAULTS = {
     "w_seq": 0.5,          # weight on the model's log-probabilities
-    "switch": 20.0,
-    "stop": 10.0,
-    "restart": 10.0,
+    "switch": 10.0,
+    "stop": 25.0,
+    "restart": 25.0,
     "min_dead_s": 1.0,
     "w_restart": 0.0,      # restart-team evidence (restart.py); the model sees no Smart Tagging
 }

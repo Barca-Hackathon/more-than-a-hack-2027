@@ -44,6 +44,18 @@ def _labels(games):
             for name, rules in tune.LABELS.items()}
 
 
+# The report's Model line for `tune-seq --logprobs` on scripts/kaggle_seq.py v3-heldout's files.
+HELDOUT_NOTE = (
+    "- **Model:** the v3 ensemble, eight temporal CNNs (seq/network.py with the touch inputs) "
+    "trained by scripts/kaggle_seq.py's V3 recipe: the Metrica games plus the open DFL "
+    "(control labels, 6 degradation seeds) and SkillCorner (one-touch labels, 3 seeds) "
+    "matches, training seeds 0-6 and one auxiliary-head variant, 3200 steps on a Kaggle T4. "
+    "Each game is predicted by the eight networks trained on the other two games (Metrica "
+    "degradation seeds 0-5), on degradation seeds 0-2, and their log-probabilities are "
+    "averaged. No BAR-ATH labels are used anywhere."
+)
+
+
 def run(train_seeds=TRAIN_SEEDS, eval_seeds=EVAL_SEEDS, games=metrica.GAMES, cfg=None,
         configs=None, log=print):
     """Per-run DataFrame: one row per (labels, seed, config, game), as tune.run."""
