@@ -71,6 +71,7 @@ def _cmd_predict(args):
     from . import pipeline, submission
     from .data.context import load_context
 
+    args.method = args.method or pipeline.SUBMISSION_METHOD
     ctx = load_context()
     labels = pipeline.run(args.method, ctx, window=args.window)
     if args.method == "baseline":
@@ -271,7 +272,7 @@ def build_parser():
     p.set_defaults(func=_cmd_deadball)
 
     p = sub.add_parser("predict", help="write a submission CSV")
-    p.add_argument("--method", default="v2", choices=("baseline", "hmm-nearest", "v1", "v2", "v3"),
+    p.add_argument("--method", default=None, choices=("baseline", "hmm-nearest", "v1", "v2", "v3"),
                    help="default: the frozen submission method (pipeline.SUBMISSION_METHOD)")
     p.add_argument("--window", type=int, default=50, help="baseline smoothing half-width")
     p.add_argument("--out", required=True, help="output CSV path")
@@ -317,7 +318,8 @@ def build_parser():
     p.set_defaults(func=_cmd_ablate)
     p = sub.add_parser("train-seq",
                        help="train the v3 sequence model on the degraded Metrica games (torch)")
-    p.add_argument("--out", default=None, help="model JSON (default: the shipped model)")
+    p.add_argument("--out", default=None, help="model JSON (default: .cache/seq_local.json; the shipped "
+                   "ensemble is trained on Kaggle by scripts/kaggle_seq.py)")
     p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5],
                    help="degradation seeds")
     p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))

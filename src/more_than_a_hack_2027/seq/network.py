@@ -37,6 +37,7 @@ Architecture (numpy forward pass here, the same graph in training.py for trainin
 The shipped model is plain JSON; prediction needs numpy only, and torch is only needed to train.
 """
 
+import glob
 import json
 import math
 import os
@@ -45,10 +46,14 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from .._paths import MODEL_DIR
+from .._paths import CACHE_DIR, MODEL_DIR
 from ..data.context import AWAY, HOME
 
-DEFAULT_MODEL = os.path.join(MODEL_DIR, "seq_v1.json")
+# The shipped v3 ensemble: every models/seq_v3_*.json (trained on a Kaggle GPU by
+# scripts/kaggle_seq.py v3-final), averaged by ensemble_logprobs.
+ENSEMBLE_GLOB = os.path.join(MODEL_DIR, "seq_v3_*.json")
+# Where `train-seq` writes a locally trained model unless told otherwise (not shipped).
+DEFAULT_MODEL = os.path.join(CACHE_DIR, "seq_local.json")
 
 K_NEAREST = 3
 DEAD_WINDOWS = (25, 75, 200)
@@ -454,7 +459,7 @@ class SeqModel:
             handle.write("\n")
 
     @classmethod
-    def from_json(cls, path=DEFAULT_MODEL):
+    def from_json(cls, path):
         with open(path) as handle:
             payload = json.load(handle)
         weights = {k: np.asarray(v["data"], dtype=np.float32).astype(np.float64).reshape(v["shape"])
@@ -469,6 +474,26 @@ def average_logprobs(logprobs_list):
     mean = np.mean([np.asarray(lp, dtype=np.float64) for lp in logprobs_list], axis=0)
     m = mean.max(axis=1, keepdims=True)
     return mean - m - np.log(np.exp(mean - m).sum(axis=1, keepdims=True))
+
+
+def load_ensemble(pattern=ENSEMBLE_GLOB):
+    """The models matching `pattern`, in path order (the averaging order is fixed)."""
+    paths = sorted(glob.glob(pattern))
+    if not paths:
+        raise FileNotFoundError("no sequence model matches {}".format(pattern))
+    return [SeqModel.from_json(p) for p in paths]
+
+
+def ensemble_logprobs(ctx, models, X, swap_sign):
+    """logprobs() of each model, averaged (average_logprobs) inside the halves, 0 elsewhere."""
+    lps = [logprobs(ctx, m, X, swap_sign) for m in models]
+    if len(lps) == 1:
+        return lps[0]
+    out = np.zeros_like(lps[0])
+    for _, first, last in ctx.halves:
+        part = slice(first, last + 1)
+        out[part] = average_logprobs([lp[part] for lp in lps])
+    return out
 
 
 def logprobs(ctx, model, X, swap_sign):

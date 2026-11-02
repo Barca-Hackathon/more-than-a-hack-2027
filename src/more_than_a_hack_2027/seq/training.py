@@ -1,6 +1,9 @@
 """Train network.py's network on the degraded Metrica games (torch; training only).
 
-    uv run --group train more-than-a-hack-2027 train-seq            # the shipped models/seq_v1.json
+    uv run --group train more-than-a-hack-2027 train-seq --touch    # one model, .cache/seq_local.json
+
+The shipped ensemble (models/seq_v3_*.json) is trained by this module on a Kaggle GPU
+(scripts/kaggle_seq.py v3-final), with the open DFL and SkillCorner matches as auxiliary data.
 
 Data: every degradation seed in `seeds` of every game in `games`, with each copy also seen with
 the teams swapped (network.swap). Labels are metrica.py's event-derived H/A/D on graded frames.

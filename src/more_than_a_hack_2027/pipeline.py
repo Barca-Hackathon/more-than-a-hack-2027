@@ -170,9 +170,10 @@ def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
     return labels
 
 
-# v3: one learned sequence model (network.py) gives log P(H), log P(A), log P(D) per frame from
-# the tracking geometry, the GT-free dead-ball outputs and the control features. The decoder is
-# the same Viterbi with a minimum stoppage length; its settings are chosen on the external games.
+# v3: a learned sequence model (seq/network.py) gives log P(H), log P(A), log P(D) per frame from
+# the tracking geometry, the GT-free dead-ball outputs, the control features and the touch inputs;
+# several such networks can be averaged as an ensemble. The decoder is the same Viterbi with a
+# minimum stoppage length; its settings are chosen held out on the external games.
 V3_DEFAULTS = {
     "w_seq": 0.5,          # weight on the model's log-probabilities
     "switch": 20.0,
@@ -184,20 +185,23 @@ V3_DEFAULTS = {
 
 
 def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
-    """cfg: V3_DEFAULTS keys plus optional stage overrides. model: a network.SeqModel; None
-    loads the shipped models/seq_v1.json."""
+    """cfg: V3_DEFAULTS keys plus optional stage overrides. model: a network.SeqModel or a list of
+    them (an ensemble, averaged); None loads the shipped ensemble, models/seq_v3_*.json."""
     from .stages import deadball, restart
     from .seq import network
     from .stages.ball import clean_ball
     from .data.tagging import load_tags
 
     top, stages = split_cfg(cfg, V3_DEFAULTS)
-    model = model if model is not None else network.SeqModel.from_json()
+    models = network.load_ensemble() if model is None else (
+        list(model) if isinstance(model, (list, tuple)) else [model])
+    touch = {bool(m.arch.get("touch")) for m in models}
+    if len(touch) != 1:
+        raise ValueError("the ensemble mixes models with and without the touch inputs")
     ball = clean_ball(ctx, stages["ball"])
     dead = deadball.detect(ctx, ball, stages["deadball"])
-    X, swap_sign = network.inputs(ctx, ball, dead, stages["control"],
-                                  touch=bool(model.arch.get("touch")))
-    lp = network.logprobs(ctx, model, X, swap_sign)
+    X, swap_sign = network.inputs(ctx, ball, dead, stages["control"], touch=touch.pop())
+    lp = network.ensemble_logprobs(ctx, models, X, swap_sign)
     graded = ctx.half_of_frame > 0
     evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
     calls = ()

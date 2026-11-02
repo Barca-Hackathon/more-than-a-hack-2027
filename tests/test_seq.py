@@ -265,3 +265,27 @@ def test_an_ensemble_of_one_is_the_model_and_ensembles_are_normalised():
     np.testing.assert_allclose(np.exp(avg).sum(axis=1), 1.0)
     shifted = network.average_logprobs([lp + 5.0 for lp in lps])  # unnormalised members
     np.testing.assert_allclose(shifted, avg, atol=1e-12)
+
+
+def test_ensemble_logprobs_average_the_members_inside_the_halves(synthetic, tmp_path):
+    n_geo = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
+    cin = n_geo + 3
+    sign = np.concatenate([network.BALL_SWAP, network.TEAM_SWAP, network.TEAM_SWAP,
+                           [1, -1, -1]])
+    ctx = synthetic(210, halves=((1, 0, 100), (2, 105, 209)))
+    X = np.random.RandomState(4).randn(210, cin)
+    a, b = _random_model(cin, seed=1), _random_model(cin, seed=2)
+    single = network.ensemble_logprobs(ctx, [a], X, sign)
+    np.testing.assert_array_equal(single, network.logprobs(ctx, a, X, sign))
+    both = network.ensemble_logprobs(ctx, [a, b], X, sign)
+    expect = network.average_logprobs([network.logprobs(ctx, m, X, sign) for m in (a, b)])
+    inside = np.zeros(210, bool)
+    inside[0:101] = inside[105:210] = True
+    np.testing.assert_allclose(both[inside], expect[inside], atol=1e-12)
+    assert (both[~inside] == 0).all()
+    for i, m in enumerate((b, a)):                # loaded in path order
+        m.to_json(str(tmp_path / "seq_v3_{}.json".format(i)))
+    loaded = network.load_ensemble(str(tmp_path / "seq_v3_*.json"))
+    np.testing.assert_allclose(loaded[1].forward(X), a.forward(X), atol=1e-5)
+    with pytest.raises(FileNotFoundError):
+        network.load_ensemble(str(tmp_path / "none_*.json"))
