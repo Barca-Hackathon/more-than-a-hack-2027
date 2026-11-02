@@ -288,6 +288,8 @@ Every match is degraded like the Metrica games (`external/degrade.py`, ball and 
 - **SkillCorner open data:** 20 A-League 2024/25 matches of broadcast tracking (github.com/SkillCorner/opendata, MIT licence, credit SkillCorner), resampled 10 → 25 Hz, 3 degradation seeds.
   - Labels: possessions are runs of SkillCorner's phases of play, with the Metrica one-touch rule applied (`external/skillcorner.py`).
 
+- **Ball while dead (since Nov 3):** the DFL and SkillCorner inputs show the ball during stoppages as the ATD does (`degrade.dead_ball_view`, see "Dead ball with the ball in view"). Before, they hid it outside the first 0.5 s and last 1 s of each stoppage.
+
 The extra matches fill half of every training batch and train the same output head as Metrica. Every score below is on a Metrica game whose networks never saw it.
 
 ### Training on a Kaggle GPU
@@ -330,9 +332,36 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
 - **Under the alternative label reading** (one-touch recoveries count), v3 scores 0.704. v2's 0.595 under that reading is the comparison.
 - **Clean tracking:** v2 gains +0.107 from clean tracking, so input quality is still the largest remaining cost. v3 has not been measured on clean tracking.
 
+### Dead ball with the ball in view (Nov 3)
+
+The Nov 2 freeze found v3 calling D on only 5% of BAR-ATH's frames with the ball seen, against 25% for v2 (see "What is frozen"). The training data taught it that: DFL and SkillCorner hid the ball during stoppages, and Metrica's ball is almost never tracked while dead, so a seen ball nearly always meant live play.
+
+- **Change** (`external/degrade.py`, `dead_ball_view`). The DFL and SkillCorner inputs keep the ball they track while it is dead, shown as the ATD shows it.
+  - `atd_dead_ball_views` reads BAR-ATH's own stoppages: the dead-ball stage's, ≥ 1 s, GT-free. There are 143, with the ball seen on 28.1% of their frames.
+  - The pattern is bimodal: 48 stoppages show the ball ≥ 95% of the time and 29 under 5%. By kind: throw-ins 80%, free kicks 69%, goals 4%.
+  - Each stoppage in a DFL or SkillCorner match copies the seen/unseen mask of one of the 10 BAR-ATH stoppages nearest in length, stretched to fit. Only that mask comes from BAR-ATH, never a position.
+  - DFL's ball is then seen on 25–31% of dead frames (5–6% before). `dfl-inputs --view atd` and `skillcorner-inputs --view atd` write `dflcv_*` and `sccv_*`.
+- **Test.** Metrica cannot measure this, so each held-out Metrica game also held out a group of DFL matches (`scripts/kaggle_seq.py`, `DFL_FOLDS`: 3 + 2 + 2 of the 7). Both recipes predicted their held-out DFL matches with the ball shown both ways, at the v3 decoder settings, with 4 training seeds per recipe.
+- **Rule, stated before the runs:**
+  - primary: held-out DFL spellF1 with the ball shown as in the ATD (4-seed ensembles), and the share of dead, ball-seen frames called D;
+  - every per-seed difference must point the same way;
+  - held-out Metrica must not drop by more than seed noise (~0.005).
+
+| 4-seed ensemble | Metrica spellF1 main / alt | DFL, ATD view: spellF1 | DFL, ATD view: dead + ball seen called D | DFL, old view: spellF1 |
+|---|---|---|---|---|
+| old recipe (ball hidden while dead) | 0.848 / 0.696 | 0.668 | 33% | 0.800 |
+| **ATD view** | **0.852 / 0.705** | **0.789** | **97%** | 0.790 |
+
+- **It passed:**
+  - per seed, the ATD view gains +0.115 to +0.122 on DFL (ATD view) and −0.002 to +0.015 on Metrica;
+  - per match, all 7 DFL matches gain +0.095 to +0.161 (match bootstrap [+0.109, +0.137]).
+- **The cost:** when every stoppage hides the ball (the old view), the new recipe loses 0.011 [−0.018, −0.003] on DFL. A missing ball no longer means a stoppage by itself. The ATD does not look like that view.
+- **What this does not measure:** the DFL test replays the same BAR-ATH masks the recipe trained on. It shows the network learned to read a visible dead ball, not that BAR-ATH's dead ball behaves like DFL's in other ways (where it rests, how it is moved). The GT-free check on BAR-ATH is in "What is frozen".
+- `kaggle_seq.py`'s `V3_VIEW = "atd"` makes this the v3 recipe. `view="edges"` rebuilds the Nov 2 job lists.
+
 ### Open items for v3
 
-1. **Dead ball with the ball in view** (the open risk, see "What is frozen"). Keep DFL's and SkillCorner's ball during stoppages at the ATD's rate, retrain held out, and score held-out DFL matches as well as Metrica.
+1. ~~**Dead ball with the ball in view**~~ done (Nov 3): see the section above.
 2. **Per-input ablation** (dead-ball channels, control features, touch channels), with ≥ 4 training seeds per row: one network's seed noise is ±0.005.
 3. **v3 on clean tracking**, for the "cost of ATD-like input" row that v2 has.
 
@@ -364,7 +393,7 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
 
   - Ball: 0.5 m white noise, then a Gaussian smoother (σ = 7 frames), both picked by a grid fit to the ATD statistics above. Each visible run is padded by linear extrapolation first, so a ball that crosses a line and disappears is not smoothed back inside (that had cut detected outs from 77 to 16).
   - Players: the ATD's own per-frame missing-player count is replayed from a seeded offset; who is missing follows a per-player priority redrawn every ~35 s (the ATD's median track run). The series is read from the ATD at run time, never stored in the repo.
-  - Known residuals: smoothed peak ball speed is lower (p99 19 vs 25 m/s), and Metrica's ball is almost never seen while dead (0.5–15%, the ATD's EM estimate is 27%).
+  - Known residuals: smoothed peak ball speed is lower (p99 19 vs 25 m/s), and Metrica's ball is almost never seen while dead (0.5–15%, the ATD's EM estimate is 27%). Metrica tracks no ball to show there, so v3's DFL and SkillCorner inputs carry the dead ball instead: they replay BAR-ATH's stoppage masks (28.1% seen; see "Dead ball with the ball in view").
 - **Protocol** (`validation/harness.py`). `evaluate()` scores any method with the official `possession_metrics.evaluate`. `logo_search()` does leave-one-game-out selection: for each held-out game it picks the config with the best mean spellF1 (macroF1 tie-break) on the other two, and reports the held-out score. Every hyperparameter choice is made here. Use the harness for relative decisions: event-derived labels are not Metrica's corrected-tracking ownership.
 - **Public 5 min.** Run `evaluation/run_evaluation.py` at milestones as a correctness alarm only, and log the result. Never pick a variant on it.
 
@@ -391,7 +420,7 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
 
 ### Open items for P4
 
-- **Ball visible during stoppages (first; v3's open risk).** The ATD shows the ball for ~27% of dead time, while the degraded external games almost never do. `external/dfl.py` and `external/skillcorner.py` hide the ball they have. Keep it at the ATD's rate, retrain v3, and score held-out DFL matches as a second validation set: Metrica has no dead-ball ball to test on.
+- ~~Ball visible during stoppages~~ done (Nov 3): DFL and SkillCorner replay the ATD's stoppage masks, and held-out DFL matches are a second validation set (see "Dead ball with the ball in view").
 - Hyperparameter search for P2's thresholds and the stop/restart penalties. Use the `validation/tune.py` pattern: 3 seeds, held out, under both label readings. The degraded variant is the decision variant; clean is a sanity check. Since v3 these matter only as network inputs.
 - ~~Multi-seed selection and paired bootstrap~~ done: `validation/tune.py` selects over 3 seeds, and `validation/ablation.py` gives paired intervals (row "decoder as frozen on Nov 1").
 - ~~Ball dropout in live play~~ done (Nov 1): see "Live-play ball gaps".
