@@ -1,6 +1,7 @@
 """Train sequence models (v3) on a Kaggle GPU: held-out runs for evaluation, or the shipped ones.
 
     uv run python scripts/kaggle_seq.py v3-final --push      # the shipped ensemble (models/seq_v3_*)
+    uv run python scripts/kaggle_seq.py dbv-atd-01 --push    # the dead-ball view experiment
     uv run python scripts/kaggle_seq.py NAME JOBS_JSON [--push] [--cpu]
 
 Why Kaggle: training one network takes ~5 min on a T4 and far longer on a laptop CPU. Only the
@@ -17,15 +18,21 @@ data may not be redistributed):
     mtah-seq-scc         SkillCorner, one-touch labels, seeds 0-2 (scc_*)
     mtah-seq-touch       the touch channels of all of the above (*_t.npz, key T), joined to the
                          base files at load time
+    mtah-seq-view        DFL (seeds 0-5) and SkillCorner (seeds 0-2) with the ball shown while
+                         dead as in the competition ATD's stoppages (dflcv_*_t, sccv_*_t; full
+                         inputs, touch included)
 
 They are the files `train-seq`, `dfl-inputs --labels control` and `skillcorner-inputs --labels
 control` (each with and without --touch) write to .cache/seq_inputs/, compressed. The degraded
 copies replay BAR-ATH's per-frame missing-player counts (a list of integers, no tracking).
 
-Jobs: [{"tag", "cfg" (training.train settings), "touch" (bool), "mode" ("heldout" | "final")}].
+Jobs: [{"tag", "cfg" (training.train settings), "touch" (bool), "mode" ("heldout" | "final"),
+optional "aux_by_game" ({game: aux files}, replacing cfg["aux"] for that held-out game) and
+"eval_by_game" ({game: more input files to predict with that game's network})}].
 held-out: for each Metrica game, train on the other two (seeds 0-5) and write {tag}_g{game}.json
 and lp_{tag}.npz, the held-out log-probabilities on evaluation seeds 0-2 (keys s{seed}_g{game}),
-which `tune-seq --logprobs` scores. final: train on all three games and write {tag}.json.
+which `tune-seq --logprobs` scores, and lp_{tag}_extra.npz for eval_by_game (keys: the files'
+base names). final: train on all three games and write {tag}.json.
 Outputs: `kaggle kernels output <user>/mtah-seq-NAME`. GPU training uses torch's deterministic
 settings where they exist (warn_only: a CUDA op without a deterministic version only warns), so a
 rerun can differ in the last bits, and it is not bit-equal to CPU training. The shipped weights are
@@ -40,7 +47,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.path.join(REPO, "src", "more_than_a_hack_2027")
 USER = os.environ.get("MTAH_KAGGLE_USER", "mertkamberov")
 DATASETS = [USER + "/mtah-seq-inputs", USER + "/mtah-seq-dflc-extra", USER + "/mtah-seq-scc",
-            USER + "/mtah-seq-touch"]
+            USER + "/mtah-seq-touch", USER + "/mtah-seq-view"]
 
 # The shipped v3 recipe (docs/TUNING_V3.md): the Metrica games plus the open DFL (control labels,
 # 6 degradation seeds) and SkillCorner (one-touch labels, 3 seeds) matches on the main head, half
@@ -62,6 +69,31 @@ def v3_jobs(mode="final"):
     jobs.append({"tag": "seq_v3_own", "touch": True, "mode": mode,
                  "cfg": dict(cfg, aux_head="own")})
     return jobs
+
+
+# The dead-ball view experiment (docs/PLAN.md, "Sequence model (v3)"): the v3 recipe trained with the
+# DFL and SkillCorner inputs as before ("edges") or with the ball shown while dead as in the ATD
+# ("atd"). Each held-out Metrica game also holds out a group of DFL matches, so both arms are
+# scored on DFL matches they never saw, with the ball shown as in the ATD (dflcv) and as before.
+DFL_FOLDS = {1: (0, 1, 2), 2: (3, 4), 3: (5, 6)}       # indices into dfl.MATCHES
+
+
+def view_jobs(arm, seeds):
+    sys.path.insert(0, os.path.join(REPO, "src"))
+    from more_than_a_hack_2027.external import dfl, skillcorner
+    aux_by_game, eval_by_game = {}, {}
+    for g, held in DFL_FOLDS.items():
+        train_dfl = [m for i, m in enumerate(dfl.MATCHES) if i not in held]
+        test_dfl = [dfl.MATCHES[i] for i in held]
+        aux_by_game[g] = ([dfl.input_file(m, s, "control", True, arm)
+                           for m in train_dfl for s in range(6)]
+                          + [skillcorner.input_file(m, s, "control", True, arm)
+                             for m in skillcorner.match_ids() for s in range(3)])
+        eval_by_game[g] = [dfl.input_file(m, s, "control", True, view)
+                           for view in ("atd", "edges") for m in test_dfl for s in range(3)]
+    return [{"tag": "dbv_{}_s{}".format(arm, s), "touch": True, "mode": "heldout",
+             "cfg": dict(V3_RECIPE, seed=s), "aux_by_game": aux_by_game,
+             "eval_by_game": eval_by_game} for s in seeds]
 
 
 KERNEL = r'''
@@ -163,12 +195,14 @@ for job in JOBS:
         print("{} final done in {:.0f} s".format(tag, time.time() - t), flush=True)
         continue
     checked = False
-    lps = {}
+    lps, extra = {}, {}
     for g in (1, 2, 3):
         t = time.time()
         train = [blocks[(s, h)] for s in range(6) for h in (1, 2, 3) if h != g]
+        by_game = job.get("aux_by_game") or {}
+        cfg_g = dict(cfg, aux=by_game.get(g, by_game.get(str(g)))) if by_game else cfg
         print("== {} held-out {}".format(tag, g), flush=True)
-        model = training.train(train, cfg, log=lambda m: print(m, flush=True),
+        model = training.train(train, cfg_g, log=lambda m: print(m, flush=True),
                                meta={"held_out": g, "seeds": list(range(6)), "device": DEVICE},
                                device=DEVICE)
         model.to_json(os.path.join(WORK, "{}_g{}.json".format(tag, g)))
@@ -182,8 +216,14 @@ for job in JOBS:
         for s in (0, 1, 2):
             X, sign, _, _, halves = blocks[(s, g)]
             lps["s{}_g{}".format(s, g)] = gpu_logprobs_halves(model, X, sign, halves).astype(np.float32)
+        by_game = job.get("eval_by_game") or {}
+        for name in by_game.get(g, by_game.get(str(g), [])):
+            X, sign, _, _, halves = training.load_cached(name)
+            extra[name[:-len(".npz")]] = gpu_logprobs_halves(model, X, sign, halves).astype(np.float32)
         print("{} held-out {} done in {:.0f} s".format(tag, g, time.time() - t), flush=True)
     np.savez(os.path.join(WORK, "lp_{}.npz".format(tag)), **lps)
+    if extra:
+        np.savez(os.path.join(WORK, "lp_{}_extra.npz".format(tag)), **extra)
 print("ALL DONE", flush=True)
 '''
 
@@ -216,6 +256,9 @@ def main(argv):
     name = argv[0]
     if name.startswith("v3-"):
         jobs = v3_jobs(name[len("v3-"):])
+    elif name.startswith("dbv-"):                  # dbv-<edges|atd>-<seed digits>, e.g. dbv-atd-01
+        _, arm, digits = name.split("-")
+        jobs = view_jobs(arm, [int(c) for c in digits])
     else:
         jobs = json.loads(argv[1])
     device = "cpu" if "--cpu" in argv else "cuda"

@@ -102,6 +102,37 @@ def score_logprobs(lps, configs=None, log=print):
     return pd.DataFrame(rows)
 
 
+def load_named_logprobs(paths):
+    """{input file base name: log-probs} from held-out files of other matches (kaggle_seq.py's
+    lp_*_extra.npz); several files are averaged as an ensemble over the names they all have."""
+    files = [np.load(p) for p in paths]
+    keys = sorted(set.intersection(*(set(f.files) for f in files)))
+    return {k: network.average_logprobs([f[k] for f in files]) for k in keys}
+
+
+def score_named(lps, cfg=None):
+    """Decode {input base name: log-probs} at v3's decoder settings (pipeline.V3_DEFAULTS plus
+    cfg) and score each against the labels cached with its inputs. Adds the share of dead frames
+    with the ball in view that are called D (`dead_seen_recall`): the failure the dead-ball view
+    experiment targets."""
+    from .. import pipeline
+    top, _ = pipeline.split_cfg(cfg, pipeline.V3_DEFAULTS)
+    trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
+    rows = []
+    for name, lp in sorted(lps.items()):
+        with np.load(os.path.join(training.CACHE_DIR, name + ".npz")) as z:
+            labels, graded, X = z["labels"], z["graded"], z["X"]
+            halves = tuple(tuple(int(v) for v in row) for row in z["halves"])
+        pred = decode.decode_match(np.where(graded[:, None], top["w_seq"] * lp, 0.0), halves,
+                                   trans, min_dead=int(round(top["min_dead_s"] * 25)))
+        seen = X[:, network.BALL_SEEN] > 0.5
+        dead_seen = graded & (labels == 2) & seen
+        rows.append({"name": name, **harness.score(labels, pred),
+                     "dead_seen_recall": float((pred[dead_seen] == "D").mean())
+                     if dead_seen.any() else float("nan")})
+    return pd.DataFrame(rows)
+
+
 def markdown(runs, configs, train_seeds, eval_seeds, games, cfg, model_note=None):
     table = tune.summary(runs).sort_values(["criterion", "macro_f1", "config"],
                                            ascending=[False, False, True])
