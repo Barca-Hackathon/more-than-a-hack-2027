@@ -51,8 +51,17 @@ def _v2(ctx, cfg):
     return pipeline.run_v2(ctx, cfg, tags=(), model=model)
 
 
-METHODS = {"baseline": _baseline, "v1": _v1, "v2": _v2}
-TRAINED = {"v2"}           # methods that need a per-held-out-game model
+def _v3(ctx, cfg):
+    cfg = dict(cfg or {})
+    model = cfg.pop("model", None)
+    if model is None:
+        raise ValueError("v3 on an external game needs a sequence model trained without that "
+                         "game: training.logo_models(...)")
+    return pipeline.run_v3(ctx, cfg, tags=(), model=model)
+
+
+METHODS = {"baseline": _baseline, "v1": _v1, "v2": _v2, "v3": _v3}
+TRAINED = {"v2"}           # methods that need a per-held-out-game control model (v3: training)
 
 
 def logo_models(games, train_variants=("degraded",), **train_kwargs):

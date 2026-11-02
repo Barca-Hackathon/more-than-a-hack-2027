@@ -170,9 +170,73 @@ def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
     return labels
 
 
+# v3: a learned sequence model (seq/network.py) gives log P(H), log P(A), log P(D) per frame from
+# the tracking geometry, the GT-free dead-ball outputs, the control features and the touch inputs;
+# the shipped one is an ensemble of eight such networks, averaged (models/seq_v3_*.json). The
+# decoder is the same Viterbi with a minimum stoppage length; its settings are chosen held out on
+# the external games (docs/TUNING_V3.md).
+V3_DEFAULTS = {
+    "w_seq": 0.5,          # weight on the model's log-probabilities
+    "switch": 10.0,
+    "stop": 25.0,
+    "restart": 25.0,
+    "min_dead_s": 1.0,
+    "w_restart": 0.0,      # restart-team evidence (restart.py); the model sees no Smart Tagging
+}
+
+
+def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
+    """cfg: V3_DEFAULTS keys plus optional stage overrides. model: a network.SeqModel or a list of
+    them (an ensemble, averaged); None loads the shipped ensemble, models/seq_v3_*.json."""
+    from .stages import deadball, restart
+    from .seq import network
+    from .stages.ball import clean_ball
+    from .data.tagging import load_tags
+
+    top, stages = split_cfg(cfg, V3_DEFAULTS)
+    models = network.load_ensemble() if model is None else (
+        list(model) if isinstance(model, (list, tuple)) else [model])
+    touch = {bool(m.arch.get("touch")) for m in models}
+    if len(touch) != 1:
+        raise ValueError("the ensemble mixes models with and without the touch inputs")
+    ball = clean_ball(ctx, stages["ball"])
+    dead = deadball.detect(ctx, ball, stages["deadball"])
+    X, swap_sign = network.inputs(ctx, ball, dead, stages["control"], touch=touch.pop())
+    lp = network.ensemble_logprobs(ctx, models, X, swap_sign)
+    graded = ctx.half_of_frame > 0
+    evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
+    calls = ()
+    if top["w_restart"]:
+        if tags is None:
+            tags = load_tags(ctx) if ctx.game == games.GAME else ()
+        calls = restart.decide(ctx, dead, tags, stages["restart"])
+        evidence[:, :2] += top["w_restart"] * restart.frame_evidence(ctx, calls, stages["restart"])
+
+    labels = _decode_v3(ctx, evidence, top)
+    if return_parts:
+        return labels, {"dead": dead, "calls": calls, "evidence": evidence, "logprobs": lp}
+    return labels
+
+
+def _decode_v3(ctx, evidence, top):
+    trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
+    return decode.decode_match(evidence, ctx.halves, trans,
+                               min_dead=int(round(top["min_dead_s"] * ctx.fps)))
+
+
+def v3_from_logprobs(ctx, lp, cfg=None):
+    """v3's labels from precomputed (n, 3) log-probabilities (e.g. held-out ones made on a GPU);
+    the same decoder as run_v3. Restart evidence needs the dead-ball stage, so it is refused."""
+    top, _ = split_cfg(cfg, V3_DEFAULTS)
+    if top["w_restart"]:
+        raise ValueError("v3_from_logprobs has no restart evidence: set w_restart to 0")
+    graded = ctx.half_of_frame > 0
+    return _decode_v3(ctx, np.where(graded[:, None], top["w_seq"] * lp, 0.0), top)
+
+
 # The frozen submission method (docs/PLAN.md, M3). `predict` without --method runs this, and
 # scripts/check_reproducibility.sh checks it from a clean copy of the repository.
-SUBMISSION_METHOD = "v2"
+SUBMISSION_METHOD = "v3"
 
 
 def run(method, ctx, **kwargs):
@@ -187,4 +251,6 @@ def run(method, ctx, **kwargs):
         return run_v1(ctx, kwargs.get("cfg"), tags=kwargs.get("tags"))
     if method == "v2":
         return run_v2(ctx, kwargs.get("cfg"), tags=kwargs.get("tags"), model=kwargs.get("model"))
+    if method == "v3":
+        return run_v3(ctx, kwargs.get("cfg"), tags=kwargs.get("tags"), model=kwargs.get("model"))
     raise ValueError("unknown method {!r}".format(method))

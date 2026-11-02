@@ -71,6 +71,7 @@ def _cmd_predict(args):
     from . import pipeline, submission
     from .data.context import load_context
 
+    args.method = args.method or pipeline.SUBMISSION_METHOD
     ctx = load_context()
     labels = pipeline.run(args.method, ctx, window=args.window)
     if args.method == "baseline":
@@ -183,6 +184,78 @@ def _cmd_tune(args):
     return 0
 
 
+def _cmd_train_seq(args):
+    import warnings
+
+    from .seq import network, training
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    blocks = [training.game_inputs(s, g, touch=args.touch) for s in args.seeds for g in args.games]
+    model = training.train(blocks, meta={"games": list(args.games), "seeds": list(args.seeds),
+                                         "variant": "degraded"})
+    model.to_json(args.out)
+    print("wrote {}".format(args.out))
+    return 0
+
+
+def _cmd_dfl_inputs(args):
+    import warnings
+
+    from .external import dfl
+    from .validation import harness
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    missing = harness._competition_missing_counts()
+    for match_id in args.matches or dfl.MATCHES:
+        for seed in args.seeds:
+            print(dfl.build_inputs(match_id, seed, missing_counts=missing, labels=args.labels,
+                                   touch=args.touch))
+    return 0
+
+
+def _cmd_skillcorner_inputs(args):
+    import warnings
+
+    from .external import skillcorner
+    from .validation import harness
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    missing = harness._competition_missing_counts()
+    for match_id in args.matches or skillcorner.match_ids():
+        for seed in args.seeds:
+            print(skillcorner.build_inputs(match_id, seed, missing_counts=missing,
+                                           labels=args.labels, touch=args.touch), flush=True)
+    return 0
+
+
+def _cmd_tune_seq(args):
+    import warnings
+
+    from .seq import tuning
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    configs = tuning.grid()
+    note = None
+    if args.logprobs:
+        runs = tuning.score_logprobs(tuning.load_logprobs(args.logprobs), configs)
+        note = args.note or tuning.HELDOUT_NOTE
+    else:
+        runs = tuning.run(tuple(args.train_seeds), tuple(args.seeds), tuple(args.games),
+                           configs=configs)
+    text = tuning.markdown(runs, configs, tuple(args.train_seeds), tuple(args.seeds),
+                            tuple(args.games), None, model_note=note)
+    print(text)
+    if args.out:
+        with open(args.out, "w") as handle:
+            handle.write(text)
+        print("wrote {}".format(args.out))
+    if args.csv:
+        os.makedirs(os.path.dirname(os.path.abspath(args.csv)), exist_ok=True)
+        runs.to_csv(args.csv, index=False)
+        print("wrote {}".format(args.csv))
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(prog="more-than-a-hack-2027", description=__doc__.split("\n")[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -199,7 +272,7 @@ def build_parser():
     p.set_defaults(func=_cmd_deadball)
 
     p = sub.add_parser("predict", help="write a submission CSV")
-    p.add_argument("--method", default="v2", choices=("baseline", "hmm-nearest", "v1", "v2"),
+    p.add_argument("--method", default=None, choices=("baseline", "hmm-nearest", "v1", "v2", "v3"),
                    help="default: the frozen submission method (pipeline.SUBMISSION_METHOD)")
     p.add_argument("--window", type=int, default=50, help="baseline smoothing half-width")
     p.add_argument("--out", required=True, help="output CSV path")
@@ -243,6 +316,49 @@ def build_parser():
     p.add_argument("--out", help="write the Markdown table here (e.g. docs/ABLATION.md)")
     p.add_argument("--csv", help="also write the per-(row, seed, game) scores (keep it in .cache/)")
     p.set_defaults(func=_cmd_ablate)
+    p = sub.add_parser("train-seq",
+                       help="train the v3 sequence model on the degraded Metrica games (torch)")
+    p.add_argument("--out", default=None, help="model JSON (default: .cache/seq_local.json; the shipped "
+                   "ensemble is trained on Kaggle by scripts/kaggle_seq.py)")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5],
+                   help="degradation seeds")
+    p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
+    p.add_argument("--touch", action="store_true", help="add the touch inputs")
+    p.set_defaults(func=_cmd_train_seq)
+
+    p = sub.add_parser("dfl-inputs",
+                       help="download the open DFL matches and cache their sequence-model inputs")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1], help="degradation seeds")
+    p.add_argument("--labels", default="control", choices=("flag", "control"),
+                   help="DFL's per-touch flag, or the flag filtered by control events")
+    p.add_argument("--matches", nargs="+", default=None, help="default: all seven")
+    p.add_argument("--touch", action="store_true", help="add the touch inputs (files *_t)")
+    p.set_defaults(func=_cmd_dfl_inputs)
+
+    p = sub.add_parser("skillcorner-inputs",
+                       help="download the SkillCorner open matches and cache their "
+                            "sequence-model inputs")
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1], help="degradation seeds")
+    p.add_argument("--labels", default="phase", choices=("phase", "control"),
+                   help="SkillCorner's phases of play, or with the one-touch rule on top")
+    p.add_argument("--matches", nargs="+", type=int, default=None, help="default: all twenty")
+    p.add_argument("--touch", action="store_true", help="add the touch inputs (files *_t)")
+    p.set_defaults(func=_cmd_skillcorner_inputs)
+
+    p = sub.add_parser("tune-seq",
+                       help="held-out decoder choice for v3 on the external games (torch)")
+    p.add_argument("--train-seeds", nargs="+", type=int, default=[0, 1, 2, 3, 4, 5])
+    p.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2], help="evaluation seeds")
+    p.add_argument("--games", nargs="+", type=int, default=[1, 2, 3], choices=(1, 2, 3))
+    p.add_argument("--out", help="write the Markdown table here (e.g. docs/TUNING_V3.md)")
+    p.add_argument("--csv", help="also write the per-run scores (keep it in .cache/)")
+    p.add_argument("--logprobs", nargs="+", default=None,
+                   help="score these held-out log-prob files (scripts/kaggle_seq.py), averaged "
+                        "as an ensemble, instead of training locally")
+    p.add_argument("--note", default=None,
+                   help="with --logprobs: the Model line of the report (what made the files; "
+                        "default: the v3 held-out files, seq/tuning.HELDOUT_NOTE)")
+    p.set_defaults(func=_cmd_tune_seq)
     return parser
 
 
@@ -250,6 +366,9 @@ def main(argv=None):
     args = build_parser().parse_args(argv)
     if args.command == "train-control" and args.out is None:
         from .stages.control import DEFAULT_MODEL
+        args.out = DEFAULT_MODEL
+    if args.command == "train-seq" and args.out is None:
+        from .seq.network import DEFAULT_MODEL
         args.out = DEFAULT_MODEL
     if getattr(args, "out", None):
         folder = os.path.dirname(os.path.abspath(args.out))

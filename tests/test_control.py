@@ -113,7 +113,13 @@ def test_training_can_leave_features_out(synthetic):
         control.train([game], drop=("nearr",))
 
 
-def test_predict_defaults_to_the_frozen_submission_method():
-    from more_than_a_hack_2027.cli import build_parser
-    args = build_parser().parse_args(["predict", "--out", "x.csv"])
-    assert args.method == pipeline.SUBMISSION_METHOD
+def test_predict_defaults_to_the_frozen_submission_method(monkeypatch, tmp_path):
+    from more_than_a_hack_2027 import cli, submission
+    from more_than_a_hack_2027.data import context
+    seen = []
+    monkeypatch.setattr(context, "load_context", lambda: None)
+    monkeypatch.setattr(pipeline, "run", lambda method, ctx, **kw: seen.append(method))
+    monkeypatch.setattr(submission, "write", lambda path, labels, ctx: {
+        "path": path, "counts": {}, "n_possessions": 0, "mean_possession_s": 0.0})
+    cli.main(["predict", "--out", str(tmp_path / "x.csv")])
+    assert seen == [pipeline.SUBMISSION_METHOD]
