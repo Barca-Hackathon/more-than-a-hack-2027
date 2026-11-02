@@ -9,7 +9,8 @@
 | **Ball & control** (P3) | **control v1 done.** `stages/control.py`: a team-symmetric logistic model trained on the external games, shipped as `models/control_v1.json` (retrained Nov 1 on the corrected labels); pipeline method **`v2`** (current best). Held-out external spellF1 **0.669** since the external games also lose the ball in live play as BAR-ATH does (0.720 without those gaps; v1 0.434). Next: dead-ball calls that survive ball gaps, then more temporal context for the team model (see "Live-play ball gaps") |
 | **External validation** (P4) | **harness v1 done; labels corrected Nov 1.** `external/metrica.py`, `external/degrade.py`, `validation/harness.py`, CLI `eval-external`; leave-one-game-out training for learned stages. Two label rules (`metrica.LABEL_RULES`): a BALL LOST never starts a possession, and a one-touch recovery is not one. Spells per game ~375 → ~245; most old "short possessions" were artefacts. `validation/tune.py` (CLI `tune` → [`docs/TUNING.md`](TUNING.md)) chooses decoder settings over 3 seeds under both label readings. Since Nov 1 `external/degrade.py` also hides the ball in live play at BAR-ATH's measured rate (see "Live-play ball gaps"). Next: search over P2 thresholds |
 | Decoder (P1) | `decode.viterbi_min_dead`: D runs ≥ `min_dead_s` (1 s), which closed a shortcut that capped the switch penalty |
-| **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD = "v2"`); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). Re-frozen twice the same day: after the label fix (switch 25 → 50, model retrained; sha256 `46fa8c61…`), then after adding live-play ball gaps to the degradation (w_control 3.2, switch 70, model retrained): sha256 `f1d4a191…`, 260 possessions. See "Freeze and reproducibility (M3)" |
+| **Sequence model** (v3) | **done and frozen (Nov 2).** `seq/network.py`, `seq/training.py`, `seq/tuning.py`: a temporal CNN over the per-frame features, trained on the Metrica games plus open DFL and SkillCorner matches on a Kaggle GPU (`scripts/kaggle_seq.py`), shipped as an ensemble of 8 networks (`models/seq_v3_*.json`). Held-out external spellF1 **0.845** (v2 0.669). See "Sequence model (v3)" |
+| **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD`, **`"v3"` since Nov 2**, `"v2"` before); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). Re-frozen twice the same day: after the label fix (switch 25 → 50, model retrained; sha256 `46fa8c61…`), then after adding live-play ball gaps to the degradation (w_control 3.2, switch 70, model retrained): sha256 `f1d4a191…`, 260 possessions. See "Freeze and reproducibility (M3)" |
 | Ball-free model + stretch (P5) | not started |
 
 How to run what exists now:
@@ -21,12 +22,16 @@ uv run more-than-a-hack-2027 info       # sanity summary of the loaded match
 uv run more-than-a-hack-2027 predict --method baseline --window 50 --out evaluation/results/x.csv
 uv run more-than-a-hack-2027 deadball --table .cache/stoppages.csv   # dead-ball diagnostics
 uv run more-than-a-hack-2027 predict --method v1 --out .cache/v1.csv  # dead ball + placeholder team evidence
-uv run more-than-a-hack-2027 predict --out .cache/v2.csv              # the frozen submission method (v2)
+uv run more-than-a-hack-2027 predict --out .cache/v3.csv              # the frozen submission method (v3)
+uv run more-than-a-hack-2027 predict --method v2 --out .cache/v2.csv  # the previous submission method
 uv run more-than-a-hack-2027 train-control              # refit models/control_v1.json (deterministic)
 uv run more-than-a-hack-2027 eval-external              # Metrica games, clean + degraded (downloads once, ~15 s)
 uv run more-than-a-hack-2027 eval-external --describe   # also the label and input statistics per game
 uv run more-than-a-hack-2027 tune --jobs 3 --out docs/TUNING.md   # choose w_control / switch, 3 seeds (~5 min)
 uv run more-than-a-hack-2027 ablate --out docs/ABLATION.md   # held-out ablation table, 3 seeds (~5 min)
+uv run python scripts/kaggle_seq.py v3-heldout --push   # held-out v3 networks on a Kaggle GPU (~2 h)
+uv run python scripts/kaggle_seq.py v3-final --push     # the shipped v3 ensemble on a Kaggle GPU (~1 h)
+uv run more-than-a-hack-2027 tune-seq --logprobs .cache/seq_heldout/lp_seq_v3_*.npz --out docs/TUNING_V3.md
 scripts/check_reproducibility.sh        # clean copy -> predict twice, validate, retrain model, tests
 uv run pytest -q
 ```
@@ -84,6 +89,10 @@ Every stage is `stage(ctx, cfg) -> np.ndarray` with a leading axis of 199,319 fr
 | `external/metrica.py`, `external/degrade.py`, `validation/harness.py` | P4 | — | External validation harness (below). |
 | `validation/ablation.py`, `scripts/check_reproducibility.sh` | P1, P4 | — | M3: held-out ablation table (`ablate` → `docs/ABLATION.md`) and the clean-copy reproducibility check. |
 | `validation/tune.py` | P4 | ✅ | Chooses v2's `w_control` and switch penalty: 3 seeds × 3 games, held out, under two label readings (`tune` → `docs/TUNING.md`). |
+| `seq/network.py` | P3 | ✅ v3 | The sequence model's inputs (the features above per frame, plus touch channels), its numpy forward pass, team-swap averaging and the ensemble average. Prediction needs numpy only. |
+| `seq/training.py`, `seq/tuning.py` | P3, P4 | ✅ v3 | Training in torch (CPU or GPU), and the held-out decoder choice (`tune-seq` → `docs/TUNING_V3.md`). |
+| `external/dfl.py`, `external/skillcorner.py` | P4 | ✅ | Open DFL and SkillCorner matches as extra training data for v3, with labels made to follow the Metrica rule. |
+| `scripts/kaggle_seq.py` | P3 | ✅ | Builds the Kaggle kernels that train v3's networks (held out, or the shipped ensemble). |
 | `diagnostics.py` | all | — | GT-free checks and debug overlays. |
 
 Organiser modules (`games.py`, `starter/`, `evaluation/`) are imported through `_paths.ensure_repo_on_path()` and are **never modified**.
@@ -248,9 +257,81 @@ Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with th
 - More training data: several degradation seeds as augmentation (cheap), then check the held-out gain.
 - ~~Feature ablation table for the tech doc~~ done: [`docs/ABLATION.md`](ABLATION.md).
 
+## Sequence model (v3)
+
+### Why
+
+v2 stalled at ~0.67 held-out spellF1. Its control model's team accuracy stays at ~0.92 whatever the model class (gradient boosting on the same features gained < 0.01), and the dead-ball stage reads a missing ball as a stoppage. What is missing is the order of events: who had the ball before, who has it next, how the players move around a gap. A network with a ±12 s view of the match can learn that from the geometry directly.
+
+### What v3 implements
+
+- **Inputs** (`seq/network.py`, 123 channels per frame, all GT-free). Ball state (8 channels). Per team, the 3 players nearest the ball, how many players are within 2/5/10 m, and the team's centroid and speed (26 channels each). The dead-ball stage's outputs and windowed speed and visibility statistics (33). control.py's 18 features. **Touch channels** (6 per team): the ball's owner is the player closest to it within 2 m, followed by track slot; the channels give the current spell's length, the time since the last spell and until the next, those spells' lengths, and how many different players owned the ball within ±3 s.
+- **Network:** a temporal CNN of ~220k weights.
+  - A strided convolution takes the 25 Hz input down to 5 Hz.
+  - Six residual blocks with dilations 1–32 give a ±12.6 s receptive field.
+  - A transposed convolution goes back to 25 Hz, plus a full-rate skip convolution.
+  - The head outputs log P(H), log P(A), log P(D) per frame.
+- **Team symmetry:** the inputs have an exact team swap (teams exchanged, pitch rotated). Training sees both copies, and prediction averages the network on the frame and on its swap, so the output is exactly team-symmetric.
+- **Prediction needs numpy only.** The weights ship as JSON, and torch is used only to train.
+- **Decoder:** the same Viterbi with a 1 s minimum stoppage, on 0.5 × the log-probabilities. Settings: switch 10, stop 25, restart 25, chosen held out ([`docs/TUNING_V3.md`](TUNING_V3.md)).
+- **The shipped model is an ensemble:** 8 networks of the same recipe, 7 training seeds plus one variant that learns the extra data through its own output head. Their log-probabilities are averaged (the renormalised geometric mean of the probabilities).
+
+### Training data
+
+Every match is degraded like the Metrica games (`external/degrade.py`, ball and player losses at BAR-ATH's measured rates) and labelled to follow the same rule: possession changes when the other team *gains* control.
+
+- **Metrica sample data**, games 1–3 (github.com/metrica-sports/sample-data), 6 degradation seeds. The only data used to choose anything.
+- **DFL open data (IDSSE):** 7 Bundesliga matches with 25 Hz positions, 6 degradation seeds.
+  - Citation: Bassek, Rein, Weber et al., "An integrated dataset of spatiotemporal and event data in elite soccer", *Scientific Data* 12, 195 (2025), doi:10.1038/s41597-025-04505-y, CC BY 4.0.
+  - Labels: DFL's per-frame possession flag changes on every touch. A change counts only if the new team has a control event of its own within ±1.5 s (`external/dfl.py`).
+- **SkillCorner open data:** 20 A-League 2024/25 matches of broadcast tracking (github.com/SkillCorner/opendata, MIT licence, credit SkillCorner), resampled 10 → 25 Hz, 3 degradation seeds.
+  - Labels: possessions are runs of SkillCorner's phases of play, with the Metrica one-touch rule applied (`external/skillcorner.py`).
+
+The extra matches fill half of every training batch and train the same output head as Metrica. Every score below is on a Metrica game whose networks never saw it.
+
+### Training on a Kaggle GPU
+
+`scripts/kaggle_seq.py` builds a Kaggle kernel from this checkout's `seq/network.py` and `seq/training.py`. The kernel reads private Kaggle datasets that hold the cached inputs above. Those are built from the open data only: never from `data/`, which may not be redistributed, and with no organiser code. The degraded copies replay BAR-ATH's per-frame missing-player counts, a list of integers with no tracking.
+
+- **Recipe:** 3200 steps of 12 crops × 160 s; AdamW, one-cycle learning rate 2e-3, weight decay 0.05, dropout 0.3, input noise 0.1; extra loss weight on possessions under 4 s (×2) and within ±12 frames of a possession change (×1).
+- **Speed:** ~5 min per network on a T4.
+- **`v3-heldout`** trains one network per held-out Metrica game and writes held-out log-probabilities, which `tune-seq --logprobs` and `ablate` score locally.
+- **`v3-final`** trains on all three games and writes `models/seq_v3_*.json`.
+
+### Results (held out, degraded with live-play gaps, Metrica games 1–3, 3 evaluation seeds)
+
+How v3 got there. Each row is the leave-one-game-out estimate under the main labels, with the decoder chosen held out for that row. Rows before the last are single networks.
+
+| step | spellF1 |
+|---|---|
+| v2 (control model + dead-ball stage) | 0.669 |
+| v3, Metrica games only | 0.816 |
+| + DFL matches, learned through a second head | 0.831 |
+| + DFL through the main head, 6 degradation seeds, 3200 steps | 0.835 (training seeds 0.826–0.837) |
+| + SkillCorner matches (one-touch rule) | 0.837–0.839 |
+| + touch channels, one network | 0.830–0.839 (own-head variant 0.824) |
+| **ensemble of the 8 touch networks (shipped)** | **0.845** (alt labels 0.704) |
+
+- **Training seeds matter as much as most changes:** one network varies by ±0.005 with its seed. The touch channels alone are within that noise. Averaging networks is what gains: the ensemble beats its mean member by +0.010 and its best by +0.006.
+- **Picking the best of many ensemble subsets would be selection bias.** Subsets of the networks trained along the way scored 0.829–0.846. The shipped ensemble is every network of the final recipe, not a chosen subset.
+- **Tried, no gain** (each within ±0.005 of its reference):
+  - restart-team evidence on top of v3;
+  - rescuing short spells after decoding;
+  - 6400 steps;
+  - 70% extra data per batch;
+  - 96 channels;
+  - a 7th dilation (64);
+  - a stride of 2 instead of 5;
+  - ending training with a Metrica-only phase.
+
+**At the shipped decoder settings** ([`docs/ABLATION.md`](ABLATION.md), paired bootstrap against v2): the ensemble scores 0.845 (seed sd 0.002), +0.176 [+0.155, +0.198]. One network (training seed 0) scores 0.839, +0.170 [+0.150, +0.190]. macroF1 rises 0.878 → 0.959 and team accuracy 0.923 → 0.963, with 233 possessions per game (true 246).
+
+- **Under the alternative label reading** (one-touch recoveries count), v3 scores 0.704. v2's 0.595 under that reading is the comparison.
+- **Clean tracking:** v2 gains +0.107 from clean tracking, so input quality is still the largest remaining cost. v3 has not been measured on clean tracking.
+
 ## External validation: the only place we tune
 
-- **Data.** Metrica's public sample data (github.com/metrica-sports/sample-data); their README asks that public use acknowledges the source, so the tech doc must.
+- **Data.** Metrica's public sample data (github.com/metrica-sports/sample-data); their README asks that public use acknowledges the source, so the tech doc must. It is the only data any choice is made on. v3 also *trains* on open DFL and SkillCorner matches (see "Sequence model (v3)", which gives the citations the tech doc must carry).
   - Games 1 and 2: CSV tracking (one file per team) plus `RawEventsData.csv`.
   - Game 3: EPTS tracking plus JSON events. The player order changes at every substitution (11 format specs), so `external/metrica.py` gives every player one fixed slot.
   - All 25 fps, 105 × 68 m. `external/metrica.py` downloads them once into `data/other_matches/metrica/` and keeps them there (never deleted; `data/` is never committed), and caches the parsed arrays in `.cache/external/` (~3 s for all three).
@@ -313,12 +394,27 @@ Ceilings (seed 0, v2 at 0.717). Each oracle replaces part of v2's output with th
 
 ### What is frozen
 
-- **Method:** `pipeline.SUBMISSION_METHOD = "v2"` with `V2_DEFAULTS` and the shipped `models/control_v1.json`. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
-- **Output today (re-frozen Nov 1 evening, after adding live-play ball gaps):** w_control 3.2, switch 70, control model retrained on the gapped games. 260 possessions, sha256 `f1d4a1919a3e05dd354bfacc9d63b7583eb4f262c26c0eca3fc97052898a0550`. A hash says nothing about the labels, so it is safe to record here.
+- **Method:** `pipeline.SUBMISSION_METHOD = "v3"`, with `V3_DEFAULTS` and the shipped ensemble `models/seq_v3_*.json` (8 networks, trained by `scripts/kaggle_seq.py v3-final`). The inputs also use `models/control_v1.json` for control.py's features. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
+- **Output today (re-frozen Nov 2 on v3):** 218 possessions (mean 17.6 s), sha256 `f26b32ba809b8d7d258f0426c234a4d01f2c604b54fafada1f5657dda94469d4`. `predict` takes ~85 s: 8 networks × 2 team views, numpy on CPU.
+- **Public 5-minute check** (logged after the choice; correctness only, band ±0.41 with 17 possessions):
+
+  | method | spellF1 | macroF1 | possessions (true 17) |
+  |---|---|---|---|
+  | v3 | 0.571 | 0.741 | 11 |
+  | v2 | 0.588 | 0.862 | 15 |
+
+  The spellF1 gap is noise. The macroF1 gap is all dead ball: v3 labels only 496 of the slice's 1,469 dead frames D (v2 1,318), while its team calls on live frames are at least as good. See the next item.
+- **Known transfer risk: a visible ball during a stoppage.** v3 calls D on only 5% of the full match's graded frames where the ball is seen, against 25% for v2. Of the frames v2 calls dead and v3 calls live, 87% have the ball in view. This is GT-free and needs no labels.
+  - The cause is a known residual of the harness: the ball is almost never visible while dead in Metrica's data (0.5–15%), against ~27% in the ATD (see "Degradation"). The SkillCorner inputs hide it the same way.
+  - So v3 has learned "ball seen → live". The external harness cannot see the failure, which biases the v3-vs-v2 margin above in v3's favour on exactly this point.
+  - Full-match dead shares: v3 39.7%, v2 52.1%. A normal match is ~40–45% dead, so v2 likely over-calls D. v3 likely under-calls it while the ball is seen.
+  - Next step, before the final submission: the DFL raw data tracks the ball while dead, but `external/dfl.py` hides it on purpose (it keeps the first 0.5 s and last 1 s of each stoppage). Keep it visible at the ATD's measured rate instead, then retrain v3. Held-out DFL matches can then measure the effect, which Metrica cannot: it has no dead-ball ball.
+- **Why the switch clears the rule below:** held out, v3 is +0.176 over v2 ([+0.155, +0.198], paired bootstrap in [`docs/ABLATION.md`](ABLATION.md)). That is an order of magnitude beyond the noise floor.
 - **History:**
-  - first freeze (Nov 1 morning): switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings;
-  - after the label fix: w_control 1.6, switch 50, 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`. The step to w 3.2 / switch 70 is a tuning tie that follows the harness change, not an improvement (see "Live-play ball gaps").
-- **Changing it** (an M2 improvement): the new method must beat v2 on the held-out external games by more than the ablation's bootstrap interval. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here.
+  - first freeze (Nov 1 morning): v2, switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings;
+  - after the label fix: v2, w_control 1.6, switch 50, 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`;
+  - after adding live-play ball gaps (Nov 1 evening): v2, w_control 3.2, switch 70, control model retrained on the gapped games, 260 possessions, sha256 `f1d4a1919a3e05dd354bfacc9d63b7583eb4f262c26c0eca3fc97052898a0550`. The step from w 1.6 / switch 50 was a tuning tie that followed the harness change, not an improvement (see "Live-play ball gaps").
+- **Changing it** (an M2 improvement): the new method must beat v3 on the held-out external games by more than the ablation's bootstrap interval. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here. For v3 the bar is high: ensembles of the same networks already differ by ±0.008, so a change needs several training seeds behind it (≥ 4) before it counts.
 
 ### Reproducibility check (`scripts/check_reproducibility.sh`)
 
@@ -334,6 +430,10 @@ It builds a clean copy of the repository: the files git would publish, or `--hea
 First run (Nov 1): 72 files, all six checks pass, and all 68 tests run in the copy (none skipped). Running it caught a regression from adding the feature-drop option for the ablation: boolean column indexing in `control.train` gave a non-contiguous array. That changed the BLAS summation order and the last bits of the weights, so the shipped model no longer regenerated byte for byte. Fixed with `np.ascontiguousarray`; the BAR-ATH output was unaffected.
 
 Re-freeze (Nov 1, after the label fix): 75 files, all six checks pass with `EXPECTED_SHA256=46fa8c61…`, and the control model retrained in the copy equals the shipped one byte for byte. All tests run in the copy (80 at the time).
+
+**v3's networks are not retrained by the check.** They are trained on a Kaggle GPU (`scripts/kaggle_seq.py v3-final`), and GPU training is not bit-equal to CPU training. torch's deterministic settings are on, but a CUDA op without a deterministic version only warns, so even a rerun on the same GPU can differ in the last bits. The shipped JSON weights are therefore the record. The check proves that the submission follows from them byte for byte (steps 2–4), and that the control model they read their features from still retrains exactly (step 5). Prediction is numpy only, with a fixed averaging order.
+
+Re-freeze on v3 (Nov 2): 100 files, the 8 network files 4.6 MB each, all under the 5 MB limit. All six checks pass with `EXPECTED_SHA256=f26b32ba…`. 112 tests pass in the copy; the 6 torch training tests skip there, because the copy installs no torch: prediction needs numpy only.
 
 ### What the ablation says ([`docs/ABLATION.md`](ABLATION.md))
 
@@ -359,6 +459,8 @@ Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected label
 - **Clean tracking is worth +0.107** (+0.057 before the live-play gaps). That is roughly the most this pipeline can gain from better input. It matters for the Nov 8 go/no-go on video ball detection, which can recover only part of that gap.
 
 Nothing was removed. Every component either helps or is within noise.
+
+**v3** (rows added Nov 2): the 8-network ensemble is +0.176 [+0.155, +0.198] over v2, and one network alone +0.170 [+0.150, +0.190]. The v2 rows above still describe the features v3 reads through control.py and the dead-ball stage. v3 has no per-input ablation yet: each one needs several GPU-trained networks to rise above the ±0.005 seed noise.
 
 ## Workstreams (5 people)
 
@@ -394,4 +496,4 @@ Everyone writes the tech-doc section for their own module. P1 compiles it.
 5. **Reproducibility:** `scripts/check_reproducibility.sh` (`--head` after committing). It runs a fresh copy plus the data bundle, then `uv sync && predict` twice, validate, the model retrain and the tests, and requires identical sha256.
 6. **No leaks:** the same script fails if the published files include `data/`, `.cache/`, private GT, submission CSVs or derived tracking exports.
 7. **Ablation:** `uv run more-than-a-hack-2027 ablate --out docs/ABLATION.md` regenerates the table byte for byte.
-8. **Tuning:** `uv run more-than-a-hack-2027 tune --out docs/TUNING.md` regenerates the decoder choice byte for byte; `pipeline.V2_DEFAULTS` must match its "Chosen" line.
+8. **Tuning:** `uv run more-than-a-hack-2027 tune --out docs/TUNING.md` regenerates the decoder choice byte for byte; `pipeline.V2_DEFAULTS` must match its "Chosen" line. For v3, `tune-seq --logprobs .cache/seq_heldout/lp_seq_v3_*.npz --out docs/TUNING_V3.md` does the same from the held-out log-probabilities, and `pipeline.V3_DEFAULTS` must match its "Chosen" line.

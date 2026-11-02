@@ -26,8 +26,10 @@ Jobs: [{"tag", "cfg" (training.train settings), "touch" (bool), "mode" ("heldout
 held-out: for each Metrica game, train on the other two (seeds 0-5) and write {tag}_g{game}.json
 and lp_{tag}.npz, the held-out log-probabilities on evaluation seeds 0-2 (keys s{seed}_g{game}),
 which `tune-seq --logprobs` scores. final: train on all three games and write {tag}.json.
-Outputs: `kaggle kernels output <user>/mtah-seq-NAME`. GPU training is deterministic run to run
-on the same hardware but not bit-equal to CPU training (see docs/PLAN.md).
+Outputs: `kaggle kernels output <user>/mtah-seq-NAME`. GPU training uses torch's deterministic
+settings where they exist (warn_only: a CUDA op without a deterministic version only warns), so a
+rerun can differ in the last bits, and it is not bit-equal to CPU training. The shipped weights are
+therefore the record; scripts/check_reproducibility.sh rebuilds the submission from them.
 """
 import json
 import os
