@@ -117,8 +117,10 @@ def _parse(match_id, path):
                         fps=ds.metadata.frame_rate, names=np.array([home.name, away.name]))
 
 
-def arrays_and_labels(match_id):
-    """(metrica.load_arrays-style dict, H/A/D codes from DFL's ball status and possession)."""
+def arrays_and_labels(match_id, hide_dead=True):
+    """(metrica.load_arrays-style dict, H/A/D codes from DFL's ball status and possession).
+    hide_dead: hide the ball while it is dead, as below; False keeps DFL's dead-ball tracking (for
+    degrade(dead_views=...), which hides it the way the ATD does)."""
     z = load_arrays(match_id)
     alive, owner, period = z["alive"], z["owner"].astype(int), z["period"].astype(int)
     xy = z["xy"].astype(np.float64)
@@ -130,9 +132,10 @@ def arrays_and_labels(match_id):
     ball = z["ball"][:, :2].astype(np.float64)
     # DFL tracks the ball while it is dead; BAR-ATH and Metrica mostly do not. Keep it only for
     # the first 0.5 s after a stop and the last 1 s before the restart.
-    edges = np.diff(np.r_[0, (~alive).astype(int), 0])
-    for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
-        ball[a + 12:max(a + 12, b - 25)] = np.nan
+    if hide_dead:
+        edges = np.diff(np.r_[0, (~alive).astype(int), 0])
+        for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+            ball[a + 12:max(a + 12, b - 25)] = np.nan
     labels = np.where(alive, owner, 2).astype(np.int8)
     arrays = {"xy": xy, "speed": speed, "ball": ball, "team_of_slot": z["team"].astype(np.int8),
               "team_names": z["names"], "period": period}
@@ -277,31 +280,40 @@ def control_labels(match_id, log=None):
     return filter_switches(flag, [f for f, _ in marks], [k for _, k in marks]).astype(np.int8)
 
 
-def input_file(match_id, seed, labels="flag", touch=False):
+def input_file(match_id, seed, labels="flag", touch=False, view="edges"):
     """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux":
-    dfl_* (flag labels) or dflc_* (control labels); *_t with the touch inputs."""
+    dfl_* (flag labels) or dflc_* (control labels); dflv_* / dflcv_* with the ATD's dead-ball
+    view; *_t with the touch inputs."""
     from ..seq.training import input_name
-    return input_name("{}_{}_s{}".format(LABEL_KINDS[labels], match_id, seed), touch)
+    kind = LABEL_KINDS[labels] + ("v" if view == "atd" else "")
+    return input_name("{}_{}_s{}".format(kind, match_id, seed), touch)
 
 
-def build_inputs(match_id, seed, missing_counts=None, labels="flag", touch=False):
+def build_inputs(match_id, seed, missing_counts=None, labels="flag", touch=False, view="edges",
+                 dead_views=None):
     """Degrade one match like the external games and cache network inputs + labels
-    (labels: "flag" or "control", see the module docstring)."""
+    (labels: "flag" or "control", see the module docstring).
+
+    view: how the ball shows while dead. "edges" keeps only the first 0.5 s and the last 1 s of
+    each stoppage (arrays_and_labels); "atd" replays the competition ATD's per-stoppage patterns
+    (degrade.dead_ball_view; dead_views defaults to degrade.atd_dead_ball_views of the match)."""
     from . import degrade, metrica
     from ..validation import harness
     from ..seq import network
     from ..seq.training import CACHE_DIR as INPUT_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels, touch))
+    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels, touch, view))
     if os.path.exists(path):
         return path
     if missing_counts is None:
         missing_counts = harness._competition_missing_counts()
-    arrays, flag = arrays_and_labels(match_id)
+    if view == "atd" and dead_views is None:
+        dead_views = _competition_dead_views()
+    arrays, flag = arrays_and_labels(match_id, hide_dead=view != "atd")
     game = 100 + MATCHES.index(match_id)
     degraded = degrade.degrade(arrays, missing_counts, {"seed": seed}, game=game,
-                               live=flag < 2)
+                               live=flag < 2, dead_views=dead_views if view == "atd" else None)
     ctx = metrica.make_context(game, degraded)
     graded = ctx.half_of_frame > 0
     codes = flag if labels == "flag" else control_labels(match_id)
@@ -310,3 +322,9 @@ def build_inputs(match_id, seed, missing_counts=None, labels="flag", touch=False
     np.savez(path, X=X, swap_sign=swap_sign, labels=labels, graded=graded,
              halves=np.array(ctx.halves))
     return path
+
+
+def _competition_dead_views():
+    from . import degrade
+    from ..data.context import load_context
+    return degrade.atd_dead_ball_views(load_context())

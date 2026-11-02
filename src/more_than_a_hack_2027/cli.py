@@ -206,10 +206,12 @@ def _cmd_dfl_inputs(args):
 
     warnings.simplefilter("ignore", RuntimeWarning)
     missing = harness._competition_missing_counts()
+    views = dfl._competition_dead_views() if args.view == "atd" else None
     for match_id in args.matches or dfl.MATCHES:
         for seed in args.seeds:
             print(dfl.build_inputs(match_id, seed, missing_counts=missing, labels=args.labels,
-                                   touch=args.touch))
+                                   touch=args.touch, view=args.view, dead_views=views),
+                  flush=True)
     return 0
 
 
@@ -221,10 +223,15 @@ def _cmd_skillcorner_inputs(args):
 
     warnings.simplefilter("ignore", RuntimeWarning)
     missing = harness._competition_missing_counts()
+    views = None
+    if args.view == "atd":
+        from .external.dfl import _competition_dead_views
+        views = _competition_dead_views()
     for match_id in args.matches or skillcorner.match_ids():
         for seed in args.seeds:
             print(skillcorner.build_inputs(match_id, seed, missing_counts=missing,
-                                           labels=args.labels, touch=args.touch), flush=True)
+                                           labels=args.labels, touch=args.touch, view=args.view,
+                                           dead_views=views), flush=True)
     return 0
 
 
@@ -333,6 +340,10 @@ def build_parser():
                    help="DFL's per-touch flag, or the flag filtered by control events")
     p.add_argument("--matches", nargs="+", default=None, help="default: all seven")
     p.add_argument("--touch", action="store_true", help="add the touch inputs (files *_t)")
+    p.add_argument("--view", default="edges", choices=("edges", "atd"),
+                   help="the ball while dead: kept 0.5 s after a stop and 1 s before the restart "
+                        "(edges), or shown as in the competition ATD's stoppages (atd; files "
+                        "*v_*)")
     p.set_defaults(func=_cmd_dfl_inputs)
 
     p = sub.add_parser("skillcorner-inputs",
@@ -343,6 +354,10 @@ def build_parser():
                    help="SkillCorner's phases of play, or with the one-touch rule on top")
     p.add_argument("--matches", nargs="+", type=int, default=None, help="default: all twenty")
     p.add_argument("--touch", action="store_true", help="add the touch inputs (files *_t)")
+    p.add_argument("--view", default="edges", choices=("edges", "atd"),
+                   help="the ball while dead: kept 0.5 s after a stop and 1 s before the restart "
+                        "(edges), or shown as in the competition ATD's stoppages (atd; files "
+                        "*v_*)")
     p.set_defaults(func=_cmd_skillcorner_inputs)
 
     p = sub.add_parser("tune-seq",

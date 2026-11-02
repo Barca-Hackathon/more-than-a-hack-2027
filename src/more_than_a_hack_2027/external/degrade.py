@@ -33,6 +33,16 @@ truth. What was measured, BAR-ATH graded frames vs the three Metrica games:
                         Placing them needs to know where play is live on the Metrica game, which
                         only its labels tell: degrade(live=...) takes that mask from the labels.
                         Gaps only hide the ball; they never add information.
+  ball, while dead      the ATD shows it on 28% of the frames inside the 143 stoppages the
+                        dead-ball stage finds (Nov 2), and per stoppage it is nearly all or
+                        nothing: 48 show it >= 95% of the time, 29 under 5%; throw-ins 80%,
+                        free kicks 69%, stoppages around goals ~4%. Metrica has almost no ball
+                        while dead, and the DFL and SkillCorner inputs used to hide theirs, so a
+                        model trained on them reads "ball seen" as "live". dead_ball_view()
+                        replays the ATD's own per-stoppage patterns (atd_dead_ball_views) onto
+                        another match's stoppages; it needs a match that tracks its dead ball
+                        (DFL, SkillCorner), and degrade(dead_views=...) takes them. GT-free: the
+                        stoppages come from the dead-ball stage, not from labels.
 
 The missing-count series is read from the competition ATD at run time (it is match-derived, so it
 is never written into the repository). Without the data, tests pass their own series.
@@ -206,7 +216,34 @@ def fragment(xy, speed, team_of_slot):
             np.concatenate(new_team))
 
 
-def degrade(arrays, missing_counts=None, cfg=None, game=0, live=None):
+def atd_dead_ball_views(ctx, min_s=1.0):
+    """GT-free: for each stoppage of at least min_s that the dead-ball stage finds in the graded
+    halves of the competition match, the (duration,) bool mask of frames on which the ATD shows
+    the ball."""
+    from ..stages import deadball
+    from ..stages.ball import clean_ball
+    seen = np.isfinite(np.asarray(ctx.ball)[:, 0])
+    stoppages = deadball.detect(ctx, clean_ball(ctx)).stoppages
+    return [seen[s.start:s.restart].copy() for s in stoppages
+            if s.half > 0 and s.duration >= min_s * ctx.fps]
+
+
+def dead_ball_view(dead, views, rng, nearest=10):
+    """(n,) bool: frames whose ball to hide inside the dead runs of `dead`. Each run takes the
+    visibility pattern of one of the `nearest` ATD stoppages closest to it in log duration (a
+    throw-in looks like a throw-in, a goal like a goal), stretched to its length."""
+    dead = np.asarray(dead, dtype=bool)
+    hide = np.zeros(len(dead), dtype=bool)
+    log_len = np.log([len(v) for v in views])
+    for a, b in _runs(dead):
+        n = int(b - a)
+        near = np.argsort(np.abs(log_len - np.log(n)), kind="stable")[:nearest]
+        view = views[near[rng.randint(len(near))]]
+        hide[a:b] = ~view[(np.arange(n) * len(view)) // n]
+    return hide
+
+
+def degrade(arrays, missing_counts=None, cfg=None, game=0, live=None, dead_views=None):
     """A degraded copy of metrica.load_arrays() output. Deterministic for a given seed + game.
 
     missing_counts: the ATD's per-frame missing-player series (atd_missing_counts); it is replayed
@@ -214,6 +251,9 @@ def degrade(arrays, missing_counts=None, cfg=None, game=0, live=None):
     live: (n,) bool, where play is live (from the game's labels); None skips the live-play ball
     gaps. They draw from their own random stream, so switching them off leaves every other
     degradation identical and on/off comparisons are paired.
+    dead_views: atd_dead_ball_views() output. With live=, the ball of every dead run is hidden as
+    in one of the ATD's stoppages (dead_ball_view), from a third random stream. For matches that
+    track their ball while it is dead; None leaves the dead-ball frames as they are.
     """
     cfg = dict(DEGRADE_DEFAULTS, **(cfg or {}))
     rng = np.random.RandomState(int(cfg["seed"]) * 1000 + int(game))
@@ -224,6 +264,10 @@ def degrade(arrays, missing_counts=None, cfg=None, game=0, live=None):
         gap_rng = np.random.RandomState([int(cfg["seed"]), int(game), 1])
         ball = ball.copy()
         ball[live_gaps(live, gap_rng, params=cfg["live_gap_params"])] = np.nan
+    if dead_views is not None and live is not None:
+        view_rng = np.random.RandomState([int(cfg["seed"]), int(game), 2])
+        ball = ball.copy()
+        ball[dead_ball_view(~np.asarray(live, dtype=bool), dead_views, view_rng)] = np.nan
     noisy = ball + rng.normal(0.0, cfg["ball_noise_m"], size=ball.shape)
     out["ball"] = gaussian_smooth(noisy, cfg["ball_sigma_frames"])
 
