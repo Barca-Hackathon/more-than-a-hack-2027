@@ -184,3 +184,23 @@ def test_training_runs_with_and_without_an_auxiliary_dataset(aux_head, tmp_path,
     assert model.arch["heads"] == (2 if aux_head == "own" else 1)
     lp = model.forward(_training_block(2)[0])
     assert lp.shape == (300, 3) and np.isfinite(lp).all()
+
+
+def test_with_aux_until_zero_the_auxiliary_rows_are_never_drawn(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    from more_than_a_hack_2027.seq import training
+
+    monkeypatch.setattr(training, "CACHE_DIR", str(tmp_path))
+    for name, seed in (("a.npz", 1), ("b.npz", 3)):
+        X, sign, labels, graded, halves = _training_block(seed)
+        np.savez(tmp_path / name, X=X, swap_sign=sign, labels=labels, graded=graded,
+                 halves=np.array(halves))
+    cfg = {"channels": 8, "dilations": (1, 2), "steps": 3, "batch": 2, "crop": 100,
+           "threads": 1, "aux_head": "main", "aux_until": 0.0}
+    one = training.train([_training_block(0)], dict(cfg, aux=("a.npz",)), log=None)
+    two = training.train([_training_block(0)], dict(cfg, aux=("b.npz",)), log=None)
+    for key in one.weights:
+        np.testing.assert_array_equal(one.weights[key], two.weights[key])
+    mixed = training.train([_training_block(0)], dict(cfg, aux=("b.npz",), aux_until=1.0),
+                           log=None)
+    assert any(not np.array_equal(one.weights[k], mixed.weights[k]) for k in one.weights)

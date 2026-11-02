@@ -39,6 +39,7 @@ TRAIN_DEFAULTS = {
     "aux": (),              # cached input files (CACHE_DIR) of an auxiliary dataset, e.g. the
                             # open DFL matches
     "aux_p": 0.5,           # share of batch rows drawn from the auxiliary dataset
+    "aux_until": 1.0,       # share of the steps that use it; the rest fine-tune on the main data
     "aux_head": "own",      # "own": learned through a second output head; "main": the aux labels
                             # are the same kind as the main ones, so they train the main head
 }
@@ -199,8 +200,9 @@ def train(blocks, cfg=None, log=print, meta=None, device="cpu"):
     net.train()
     for step in range(int(cfg["steps"])):
         xb, yb, wb, hb = [], [], [], []
+        aux_p = cfg["aux_p"] if step < cfg["aux_until"] * cfg["steps"] else 0.0
         for _ in range(int(cfg["batch"])):
-            k = int(bool(aux) and rng.rand() < cfg["aux_p"])
+            k = int(bool(aux) and rng.rand() < aux_p)
             pool = pools[k]
             x, y, w, sign = pool[rng.choice(len(pool), p=probs[k])]
             hb.append(k if heads > 1 else 0)
