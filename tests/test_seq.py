@@ -300,3 +300,16 @@ def test_decoding_saved_logprobs_gives_run_v3s_labels(synthetic):
     np.testing.assert_array_equal(pipeline.v3_from_logprobs(ctx, parts["logprobs"]), labels)
     with pytest.raises(ValueError):
         pipeline.v3_from_logprobs(ctx, parts["logprobs"], {"w_restart": 1.0})
+
+
+def test_the_shipped_ensemble_is_eight_touch_networks_on_all_three_games():
+    import glob
+    paths = sorted(glob.glob(network.ENSEMBLE_GLOB))
+    assert len(paths) == 8
+    models = network.load_ensemble()
+    for m in models:
+        assert m.arch["touch"] and len(m.scale) == network.N_BASE + 2 * network.TOUCH_BLOCK
+        assert m.arch["stride"] == 5 and m.info["games"] == [1, 2, 3]
+    X = np.random.RandomState(0).randn(53, len(models[0].scale))
+    lp = models[0].forward(X)
+    assert lp.shape == (53, 3) and np.allclose(np.exp(lp).sum(axis=1), 1.0)

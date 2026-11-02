@@ -172,9 +172,9 @@ def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
 
 # v3: a learned sequence model (seq/network.py) gives log P(H), log P(A), log P(D) per frame from
 # the tracking geometry, the GT-free dead-ball outputs, the control features and the touch inputs;
-# several such networks can be averaged as an ensemble. The decoder is the same Viterbi with a
-# minimum stoppage length; its settings are chosen held out on the external games
-# (docs/TUNING_V3.md).
+# the shipped one is an ensemble of eight such networks, averaged (models/seq_v3_*.json). The
+# decoder is the same Viterbi with a minimum stoppage length; its settings are chosen held out on
+# the external games (docs/TUNING_V3.md).
 V3_DEFAULTS = {
     "w_seq": 0.5,          # weight on the model's log-probabilities
     "switch": 10.0,
@@ -236,7 +236,7 @@ def v3_from_logprobs(ctx, lp, cfg=None):
 
 # The frozen submission method (docs/PLAN.md, M3). `predict` without --method runs this, and
 # scripts/check_reproducibility.sh checks it from a clean copy of the repository.
-SUBMISSION_METHOD = "v2"
+SUBMISSION_METHOD = "v3"
 
 
 def run(method, ctx, **kwargs):
