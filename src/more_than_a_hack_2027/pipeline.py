@@ -176,7 +176,7 @@ def run_v2(ctx, cfg=None, return_parts=False, tags=None, model=None):
 # decoder is the same Viterbi with a minimum stoppage length; its settings are chosen held out on
 # the external games (docs/TUNING_V3.md).
 V3_DEFAULTS = {
-    "w_seq": 0.5,          # weight on the model's log-probabilities
+    "w_seq": 1.0,          # weight on the model's log-probabilities
     "switch": 10.0,
     "stop": 25.0,
     "restart": 25.0,

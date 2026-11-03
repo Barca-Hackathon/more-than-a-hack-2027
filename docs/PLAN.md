@@ -9,7 +9,7 @@
 | **Ball & control** (P3) | **control v1 done.** `stages/control.py`: a team-symmetric logistic model trained on the external games, shipped as `models/control_v1.json` (retrained Nov 1 on the corrected labels); pipeline method **`v2`**, the submission until Nov 2 (superseded by v3, which still reads control.py's features). Held-out external spellF1 **0.669** since the external games also lose the ball in live play as BAR-ATH does (0.720 without those gaps; v1 0.434). The "more temporal context" it needed became v3 |
 | **External validation** (P4) | **harness v1 done; labels corrected Nov 1.** `external/metrica.py`, `external/degrade.py`, `validation/harness.py`, CLI `eval-external`; leave-one-game-out training for learned stages. Two label rules (`metrica.LABEL_RULES`): a BALL LOST never starts a possession, and a one-touch recovery is not one. Spells per game ~375 → ~245; most old "short possessions" were artefacts. `validation/tune.py` (CLI `tune` → [`docs/TUNING.md`](TUNING.md)) chooses decoder settings over 3 seeds under both label readings. Since Nov 1 `external/degrade.py` also hides the ball in live play at BAR-ATH's measured rate (see "Live-play ball gaps"). Since Nov 2 v3 also trains on open DFL and SkillCorner matches. **Next: show the ball during stoppages at the ATD's rate** (v3's open risk, see "What is frozen"), and validate on held-out DFL matches |
 | Decoder (P1) | `decode.viterbi_min_dead`: D runs ≥ `min_dead_s` (1 s), which closed a shortcut that capped the switch penalty |
-| **Sequence model** (v3) | **done and frozen (Nov 2).** `seq/network.py`, `seq/training.py`, `seq/tuning.py`: a temporal CNN over the per-frame features, trained on the Metrica games plus open DFL and SkillCorner matches on a Kaggle GPU (`scripts/kaggle_seq.py`), shipped as an ensemble of 8 networks (`models/seq_v3_*.json`). Held-out external spellF1 **0.845** (v2 0.669). BAR-ATH: 218 possessions, sha256 `f26b32ba…`. **Open risk:** it rarely calls dead ball while the ball is visible, which the harness cannot measure yet. See "Sequence model (v3)" and "What is frozen" |
+| **Sequence model** (v3) | **done; re-frozen Nov 3.** `seq/network.py`, `seq/training.py`, `seq/tuning.py`: a temporal CNN over the per-frame features, trained on the Metrica games plus open DFL and SkillCorner matches on a Kaggle GPU (`scripts/kaggle_seq.py`), shipped as an ensemble of 8 networks (`models/seq_v3_*.json`). Held-out external spellF1 **0.846** (alt labels 0.710; v2 0.669). Since Nov 3 the DFL and SkillCorner inputs show the ball while dead as the ATD does. That fixed the dead-ball miss found at the Nov 2 freeze: held-out DFL 0.668 → 0.789. BAR-ATH: 218 possessions, sha256 `4c927710…`. See "Sequence model (v3)" and "What is frozen" |
 | **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD`, **`"v3"` since Nov 2**, `"v2"` before); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). Re-frozen twice the same day: after the label fix (switch 25 → 50, model retrained; sha256 `46fa8c61…`), then after adding live-play ball gaps to the degradation (w_control 3.2, switch 70, model retrained): sha256 `f1d4a191…`, 260 possessions. See "Freeze and reproducibility (M3)" |
 | Ball-free model + stretch (P5) | not started. v3 already reads player movement through ball gaps, so `shape.py` waits for a measured need |
 
@@ -173,7 +173,7 @@ Current v1 values are shown next to the prior used to judge them.
 - Restarts with `restart_kind = posterior` (42 of them) have no event to snap to. Check whether a team-acceleration onset snaps them better.
 - 20 restarts have disagreeing sources (taker vs tag vs last toucher). Inspect a sample with the homography overlays.
 - v1 produced 456 possessions over the match because of the placeholder nearest-player team evidence. v2 (with `stages/control.py`) produces 260 (290, then 252, at the earlier Nov 1 freezes). v3 produces 218.
-- **For v3:** its dead-ball calls come from the network, which reads this stage's outputs as inputs. On BAR-ATH it overrides them when the ball is visible (see "What is frozen"). Fixing the training data is the first step; a stoppage prior from this stage in the decoder is the fallback.
+- **For v3:** its dead-ball calls come from the network, which reads this stage's outputs as inputs. Until Nov 3 it overrode them on BAR-ATH when the ball was visible. Training on DFL and SkillCorner inputs that show the ball while dead fixed most of that (see "Dead ball with the ball in view"). If more is needed, a stoppage prior from this stage in the decoder is the fallback, judged on held-out DFL.
 
 ## Control design (P3)
 
@@ -298,6 +298,8 @@ The extra matches fill half of every training batch and train the same output he
 
 - **Recipe:** 3200 steps of 12 crops × 160 s; AdamW, one-cycle learning rate 2e-3, weight decay 0.05, dropout 0.3, input noise 0.1; extra loss weight on possessions under 4 s (×2) and within ±12 frames of a possession change (×1).
 - **Speed:** ~5 min per network on a T4.
+- **Splitting:** `v3-heldout-01` or `v3-final-456o` trains only those members (digits are training seeds, `o` the own-head variant), so the eight networks run as several kernels on Kaggle's two GPU slots.
+- **Watchdog:** a kernel that logs nothing for 20 minutes dumps its stacks and exits as an error. On Nov 3 a session hung two minutes into training and held its GPU for 8 hours; the longest normal silence is under 5 minutes.
 - **`v3-heldout`** trains one network per held-out Metrica game and writes held-out log-probabilities, which `tune-seq --logprobs` and `ablate` score locally.
 - **`v3-final`** trains on all three games and writes `models/seq_v3_*.json`.
 
@@ -313,7 +315,8 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
 | + DFL through the main head, 6 degradation seeds, 3200 steps | 0.835 (training seeds 0.826–0.837) |
 | + SkillCorner matches (one-touch rule) | 0.837–0.839 |
 | + touch channels, one network | 0.830–0.839 (own-head variant 0.824) |
-| **ensemble of the 8 touch networks (shipped)** | **0.845** (alt labels 0.704) |
+| ensemble of the 8 touch networks (Nov 2) | 0.845 (alt labels 0.704) |
+| **+ ball shown while dead as in the ATD, decoder retuned (Nov 3, shipped)** | **0.846** (alt labels 0.710) |
 
 - **Training seeds matter as much as most changes:** one network varies by ±0.005 with its seed. The touch channels alone are within that noise. Averaging networks is what gains: the ensemble beats its mean member by +0.010 and its best by +0.006.
 - **Picking the best of many ensemble subsets would be selection bias.** Subsets of the networks trained along the way scored 0.829–0.846. The shipped ensemble is every network of the final recipe, not a chosen subset.
@@ -327,9 +330,9 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
   - a stride of 2 instead of 5;
   - ending training with a Metrica-only phase.
 
-**At the shipped decoder settings** ([`docs/ABLATION.md`](ABLATION.md), paired bootstrap against v2): the ensemble scores 0.845 (seed sd 0.002), +0.176 [+0.155, +0.198]. One network (training seed 0) scores 0.839, +0.170 [+0.150, +0.190]. macroF1 rises 0.878 → 0.959 and team accuracy 0.923 → 0.963, with 233 possessions per game (true 246).
+**At the shipped decoder settings** ([`docs/ABLATION.md`](ABLATION.md), paired bootstrap against v2): the ensemble scores 0.846 (seed sd 0.001), +0.177 [+0.157, +0.198]. One network (training seed 0) scores 0.841, +0.172 [+0.152, +0.193]. macroF1 rises 0.878 → 0.963 and team accuracy 0.923 → 0.963, with 244 possessions per game (true 246). The Nov 2 ensemble, at its own decoder, scored 0.845, +0.176 [+0.155, +0.198]: on Metrica, the Nov 3 change is neutral, as it should be.
 
-- **Under the alternative label reading** (one-touch recoveries count), v3 scores 0.704. v2's 0.595 under that reading is the comparison.
+- **Under the alternative label reading** (one-touch recoveries count), v3 scores 0.716 (Nov 2: 0.704). v2's 0.595 under that reading is the comparison.
 - **Clean tracking:** v2 gains +0.107 from clean tracking, so input quality is still the largest remaining cost. v3 has not been measured on clean tracking.
 
 ### Dead ball with the ball in view (Nov 3)
@@ -431,27 +434,37 @@ The Nov 2 freeze found v3 calling D on only 5% of BAR-ATH's frames with the ball
 
 ### What is frozen
 
-- **Method:** `pipeline.SUBMISSION_METHOD = "v3"`, with `V3_DEFAULTS` and the shipped ensemble `models/seq_v3_*.json` (8 networks, trained by `scripts/kaggle_seq.py v3-final`). The inputs also use `models/control_v1.json` for control.py's features. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
-- **Output today (re-frozen Nov 2 on v3):** 218 possessions (mean 17.6 s), sha256 `f26b32ba809b8d7d258f0426c234a4d01f2c604b54fafada1f5657dda94469d4`. `predict` takes ~85 s: 8 networks × 2 team views, numpy on CPU.
+- **Method:** `pipeline.SUBMISSION_METHOD = "v3"`, with `V3_DEFAULTS` (w_seq 1.0, switch 10, stop 25, restart 25, 1 s minimum stoppage; [`docs/TUNING_V3.md`](TUNING_V3.md)) and the shipped ensemble `models/seq_v3_*.json` (8 networks, trained by `scripts/kaggle_seq.py v3-final`). The inputs also use `models/control_v1.json` for control.py's features. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
+- **Output today (re-frozen Nov 3 on v3 with the dead-ball fix):** 218 possessions (mean 16.0 s), sha256 `4c927710506eb87416886c642beb5be610e12bb70020fd1da8ae72fb12673c3a`. `predict` takes ~90 s: 8 networks × 2 team views, numpy on CPU.
 - **Public 5-minute check** (logged after the choice; correctness only, band ±0.41 with 17 possessions):
 
   | method | spellF1 | macroF1 | possessions (true 17) |
   |---|---|---|---|
-  | v3 | 0.571 | 0.741 | 11 |
+  | **v3 (Nov 3)** | 0.593 | 0.914 | 10 |
+  | v3 (Nov 2) | 0.571 | 0.741 | 11 |
   | v2 | 0.588 | 0.862 | 15 |
 
-  The spellF1 gap is noise. The macroF1 gap is all dead ball: v3 labels only 496 of the slice's 1,469 dead frames D (v2 1,318), while its team calls on live frames are at least as good. See the next item.
-- **Known transfer risk: a visible ball during a stoppage.** v3 calls D on only 5% of the full match's graded frames where the ball is seen, against 25% for v2. Of the frames v2 calls dead and v3 calls live, 87% have the ball in view. This is GT-free and needs no labels.
-  - The cause is a known residual of the harness: the ball is almost never visible while dead in Metrica's data (0.5–15%), against ~27% in the ATD (see "Degradation"). The SkillCorner inputs hide it the same way.
-  - So v3 has learned "ball seen → live". The external harness cannot see the failure, which biases the v3-vs-v2 margin above in v3's favour on exactly this point.
-  - Full-match dead shares: v3 39.7%, v2 52.1%. A normal match is ~40–45% dead, so v2 likely over-calls D. v3 likely under-calls it while the ball is seen.
-  - Next step, before the final submission: the DFL raw data tracks the ball while dead, but `external/dfl.py` hides it on purpose (it keeps the first 0.5 s and last 1 s of each stoppage). Keep it visible at the ATD's measured rate instead, then retrain v3. Held-out DFL matches can then measure the effect, which Metrica cannot: it has no dead-ball ball.
-- **Why the switch clears the rule below:** held out, v3 is +0.176 over v2 ([+0.155, +0.198], paired bootstrap in [`docs/ABLATION.md`](ABLATION.md)). That is an order of magnitude beyond the noise floor.
+  The spellF1 gaps are noise. The macroF1 gaps are dead ball. The Nov 2 v3 labelled only 496 of the slice's 1,469 dead frames D. The Nov 3 one labels 1,260, against v2's 1,318, and calls 19 live frames D (v2 447). Team calls on live frames are unchanged (0.928 vs 0.930; v2 0.864). This was scored after the re-freeze and played no part in it. See the next item.
+- **Dead ball with the ball in view: found at the Nov 2 freeze, fixed on Nov 3.** All GT-free, full match:
+
+  | | v2 | v3 (Nov 2) | v3 (Nov 3) |
+  |---|---|---|---|
+  | dead share | 52.1% | 39.7% | 45.3% |
+  | D where the ball is seen | 24.7% | 5.1% | 14.0% |
+  | … inside the dead-ball stage's stoppages (≥ 1 s) | 100% | 19% | 51% |
+  | … outside them | 0% | 0.5% | 1.8% |
+
+  - **Cause:** the ball is almost never visible while dead in Metrica's data (0.5–15%), against ~28% in the ATD. `external/dfl.py` and `external/skillcorner.py` hid the ball they had, so the Nov 2 v3 learned "ball seen → live". The Metrica harness could not see the failure.
+  - **Fix:** the DFL and SkillCorner inputs now replay the ATD's stoppage masks, and held-out DFL matches measure the effect (see "Dead ball with the ball in view").
+  - **What the numbers suggest:** with ~43% of the match dead and the ball seen on ~28% of dead frames, about 20% of ball-seen frames should be dead. The Nov 3 v3 is at 14%, and its dead share is inside the normal 40–45%. v2 likely over-calls D (52%).
+  - **Left:** which stoppages the Nov 3 v3 still rides through cannot be told without labels. The P2 row under "Workstreams" has the next steps.
+- **Why the switch clears the rule below:** held out, v3 is +0.177 over v2 ([+0.157, +0.198], paired bootstrap in [`docs/ABLATION.md`](ABLATION.md)). That is an order of magnitude beyond the noise floor. The Nov 3 re-freeze cleared its own rule, stated before the runs, on held-out DFL (see "Dead ball with the ball in view"). On Metrica it is neutral.
 - **History:**
   - first freeze (Nov 1 morning): v2, switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings;
   - after the label fix: v2, w_control 1.6, switch 50, 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`;
-  - after adding live-play ball gaps (Nov 1 evening): v2, w_control 3.2, switch 70, control model retrained on the gapped games, 260 possessions, sha256 `f1d4a1919a3e05dd354bfacc9d63b7583eb4f262c26c0eca3fc97052898a0550`. The step from w 1.6 / switch 50 was a tuning tie that followed the harness change, not an improvement (see "Live-play ball gaps").
-- **Changing it** (an M2 improvement): the new method must beat v3 on the held-out external games by more than the ablation's bootstrap interval. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here. For v3 the bar is high: ensembles of the same networks already differ by ±0.008, so a change needs several training seeds behind it (≥ 4) before it counts.
+  - after adding live-play ball gaps (Nov 1 evening): v2, w_control 3.2, switch 70, control model retrained on the gapped games, 260 possessions, sha256 `f1d4a1919a3e05dd354bfacc9d63b7583eb4f262c26c0eca3fc97052898a0550`. The step from w 1.6 / switch 50 was a tuning tie that followed the harness change, not an improvement (see "Live-play ball gaps");
+  - v3 (Nov 2): DFL and SkillCorner inputs that hid the ball while dead, w_seq 0.5, switch 10, stop 25, 218 possessions, sha256 `f26b32ba809b8d7d258f0426c234a4d01f2c604b54fafada1f5657dda94469d4`. Replaced on Nov 3 because it rarely called a stoppage with the ball in view.
+- **Changing it** (an M2 improvement): the new method must beat v3 on the held-out external games by more than the ablation's bootstrap interval. Since Nov 3, held-out DFL matches (`kaggle_seq.py`, `DFL_FOLDS`) are a second validation set, for what Metrica cannot show, such as the ball while dead. A change judged there states its rule before the runs, and Metrica must not drop. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here. For v3 the bar is high: ensembles of the same networks already differ by ±0.008, so a change needs several training seeds behind it (≥ 4) before it counts.
 
 ### Reproducibility check (`scripts/check_reproducibility.sh`)
 
@@ -471,6 +484,8 @@ Re-freeze (Nov 1, after the label fix): 75 files, all six checks pass with `EXPE
 **v3's networks are not retrained by the check.** They are trained on a Kaggle GPU (`scripts/kaggle_seq.py v3-final`), and GPU training is not bit-equal to CPU training. torch's deterministic settings are on, but a CUDA op without a deterministic version only warns, so even a rerun on the same GPU can differ in the last bits. The shipped JSON weights are therefore the record. The check proves that the submission follows from them byte for byte (steps 2–4), and that the control model they read their features from still retrains exactly (step 5). Prediction is numpy only, with a fixed averaging order.
 
 Re-freeze on v3 (Nov 2): 100 files, the 8 network files 4.6 MB each, all under the 5 MB limit. All six checks pass with `EXPECTED_SHA256=f26b32ba…`. 112 tests pass in the copy; the 6 torch training tests skip there, because the copy installs no torch: prediction needs numpy only.
+
+Re-freeze on v3 with the dead-ball fix (Nov 3): the 8 retrained network files are again 4.6 MB each. All six checks pass with `EXPECTED_SHA256=4c927710…`. 115 tests pass in the copy and the same 6 torch tests skip.
 
 ### What the ablation says ([`docs/ABLATION.md`](ABLATION.md))
 
@@ -497,14 +512,14 @@ Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected label
 
 Nothing was removed. Every component either helps or is within noise.
 
-**v3** (rows added Nov 2): the 8-network ensemble is +0.176 [+0.155, +0.198] over v2, and one network alone +0.170 [+0.150, +0.190]. The v2 rows above still describe the features v3 reads through control.py and the dead-ball stage. v3 has no per-input ablation yet: each one needs several GPU-trained networks to rise above the ±0.005 seed noise.
+**v3** (rows added Nov 2, updated at the Nov 3 re-freeze): the 8-network ensemble is +0.177 [+0.157, +0.198] over v2, and one network alone +0.172 [+0.152, +0.193]. The reference row "v3 as frozen on Nov 2", decoded at its own settings, is +0.176 [+0.155, +0.198]. The v2 rows above still describe the features v3 reads through control.py and the dead-ball stage. v3 has no per-input ablation yet: each one needs several GPU-trained networks to rise above the ±0.005 seed noise.
 
 ## Workstreams (5 people)
 
 | who | owns | next deliverable |
 |---|---|---|
 | **P1 Platform & decoder** | platform, `stages/decode.py`, final assembly, reproducibility | Tech doc assembly; re-run the freeze (`ablate`, `scripts/check_reproducibility.sh --head`) after each change |
-| **P2 Dead ball** | `data/tagging`, `stages/ball` (cleaning), `stages/deadball`, `stages/hmm2`, `stages/restart` | v3's dead-ball miss on BAR-ATH: measure the ATD's ball-while-dead pattern GT-free (where the ball rests, for how long) for P4's degradation |
+| **P2 Dead ball** | `data/tagging`, `stages/ball` (cleaning), `stages/deadball`, `stages/hmm2`, `stages/restart` | v3 still calls fewer stoppages with the ball in view than the stage (51% vs 100% of those frames on BAR-ATH): measure GT-free where the ATD's dead ball rests and how it moves, and try a stoppage prior in the decoder, judged on held-out DFL |
 | **P3 Ball & control → sequence model** | `stages/ball`, `stages/control`, `seq/`, `scripts/kaggle_seq.py` | Retrain v3 on data with the ball visible during stoppages; per-input ablation with ≥ 4 training seeds |
 | **P4 External validation** | `external/metrica`, `external/degrade`, `external/dfl`, `external/skillcorner`, `validation/harness`, `validation/tune`; the hyperparameter search | Ball visible during stoppages in the external inputs; held-out DFL matches as a second validation set |
 | **P5 Ball-free + stretch** | `shape`, `tag_prior`; stretch | Pseudo-label set + shape classifier (critical: the ball is missing in long blocks) |
@@ -515,8 +530,8 @@ Everyone writes the tech-doc section for their own module. P1 compiles it.
 
 - **M0, Nov 1–2.** ✅ Skeleton, interfaces and baseline parity; `.cache/` gitignored. Still to do: rename the tactical mp4 to `data/tactical/BAR-ATH_tactical.mp4`, and make sure `origin` (`meroo893/more-than-a-hack-2027`) is public before submitting.
 - **M1, Nov 3–6.** v1 of every module; first fused submission; external harness running. ✅ Done early (v2, Nov 1).
-- **M2, Nov 7–11.** Improvements over the frozen method, each cleared by the held-out rule. Started early with v3 (Nov 2), which replaced the planned HSMM, boundary snapping and fusion weights with one learned model. Still open: v3's dead-ball risk. **Nov 8 go/no-go for the stretch work.**
-- **M3, Nov 12–14.** Feature freeze; ablation table for the doc (external harness); reproducibility check from a clean clone. ✅ The tooling is done and passes on v2 (Nov 1) and on v3 (Nov 2, sha256 `f26b32ba…`). At the real freeze: commit, then rerun `ablate` and `scripts/check_reproducibility.sh --head`, and record the hash.
+- **M2, Nov 7–11.** Improvements over the frozen method, each cleared by the held-out rule. Started early with v3 (Nov 2), which replaced the planned HSMM, boundary snapping and fusion weights with one learned model. Its dead-ball risk was fixed on Nov 3 (ball shown while dead in the DFL and SkillCorner inputs, judged on held-out DFL). **Nov 8 go/no-go for the stretch work.**
+- **M3, Nov 12–14.** Feature freeze; ablation table for the doc (external harness); reproducibility check from a clean clone. ✅ The tooling is done and passes on v2 (Nov 1) and on v3 (Nov 2, sha256 `f26b32ba…`; Nov 3, `4c927710…`). At the real freeze: commit, then rerun `ablate` and `scripts/check_reproducibility.sh --head`, and record the hash.
 - **M4, Nov 15–16.** Final `<team>.csv` + tech doc; validate; **submit Nov 16**.
 
 ## Stretch (P5 after M1, gated at Nov 8)
