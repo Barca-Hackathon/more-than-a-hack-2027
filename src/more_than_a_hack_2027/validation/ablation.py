@@ -90,8 +90,9 @@ ROWS = (
         section="Reference"),
     Row("nov1", "decoder as frozen on Nov 1 (w_control 1.6, switch 25, tuned on the older labels)",
         "v2", cfg={"w_control": 1.6, "switch": 25.0}, section="Reference"),
-    Row("v3-nov2", "v3 as frozen on Nov 2 (DFL and SkillCorner inputs hide the ball while dead)",
-        "v3", logprobs=V3_NOV2_MEMBERS, section="Reference"),
+    Row("v3-nov2", "v3 as frozen on Nov 2 (DFL and SkillCorner inputs hide the ball while dead; "
+        "its own decoder, w_seq 0.5)", "v3", cfg={"w_seq": 0.5}, logprobs=V3_NOV2_MEMBERS,
+        section="Reference"),
 )
 
 
