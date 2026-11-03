@@ -313,3 +313,23 @@ def test_the_shipped_ensemble_is_eight_touch_networks_on_all_three_games():
     X = np.random.RandomState(0).randn(53, len(models[0].scale))
     lp = models[0].forward(X)
     assert lp.shape == (53, 3) and np.allclose(np.exp(lp).sum(axis=1), 1.0)
+
+
+def test_named_held_out_files_are_scored_against_their_cached_labels(tmp_path, monkeypatch):
+    from more_than_a_hack_2027.seq import training, tuning
+    monkeypatch.setattr(training, "CACHE_DIR", str(tmp_path))
+    n = 600
+    labels = np.array([0] * 200 + [2] * 100 + [1] * 300, dtype=np.int8)
+    X = np.zeros((n, network.N_BASE))
+    X[:, network.BALL_SEEN] = 1.0                       # ball in view throughout, also while dead
+    np.savez(str(tmp_path / "toy_s0.npz"), X=X, labels=labels, graded=np.ones(n, bool),
+             halves=np.array([(1, 0, n - 1)]), swap_sign=np.ones(network.N_BASE))
+    lp = np.log(np.full((n, 3), 0.01))
+    lp[np.arange(n), labels] = np.log(0.98)
+    np.savez(str(tmp_path / "lp_a_extra.npz"), toy_s0=lp)
+    np.savez(str(tmp_path / "lp_b_extra.npz"), toy_s0=lp, other=lp)
+    lps = tuning.load_named_logprobs([str(tmp_path / "lp_a_extra.npz"),
+                                      str(tmp_path / "lp_b_extra.npz")])
+    assert sorted(lps) == ["toy_s0"]
+    row = tuning.score_named(lps).iloc[0]
+    assert row["spell_f1_mean"] == 1.0 and row["dead_seen_recall"] == 1.0

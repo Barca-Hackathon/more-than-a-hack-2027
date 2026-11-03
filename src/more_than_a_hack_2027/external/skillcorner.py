@@ -205,9 +205,11 @@ def control_spells(phases, touches):
     return out
 
 
-def arrays_and_labels(match_id, labels="phase"):
+def arrays_and_labels(match_id, labels="phase", hide_dead=True):
     """(metrica.load_arrays-style dict at 25 Hz, H/A/D codes from the phases of play; X where
-    nobody is tracked). labels: "phase" or "control" (control_spells)."""
+    nobody is tracked). labels: "phase" or "control" (control_spells). hide_dead: hide the ball
+    while it is dead, as below; False keeps SkillCorner's (extrapolated) dead-ball positions, for
+    degrade(dead_views=...)."""
     z = load_source(match_id)
     spells = read_phases(match_id)
     if labels == "control":
@@ -235,10 +237,11 @@ def arrays_and_labels(match_id, labels="phase"):
         speed[rows] = np.hypot(v[..., 0], v[..., 1])
     # As for DFL: BAR-ATH and Metrica mostly lose the ball while it is dead. Keep it only for
     # the first 0.5 s after a stop and the last 1 s before the restart.
-    dead = labels == 2
-    edges = np.diff(np.r_[0, dead.astype(int), 0])
-    for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
-        ball[a + 12:max(a + 12, b - 25)] = np.nan
+    if hide_dead:
+        dead = labels == 2
+        edges = np.diff(np.r_[0, dead.astype(int), 0])
+        for a, b in zip(np.flatnonzero(edges == 1), np.flatnonzero(edges == -1)):
+            ball[a + 12:max(a + 12, b - 25)] = np.nan
     # Broadcast replays leave stretches with nobody tracked (~30 min a match, mostly while the
     # ball is dead). BAR-ATH is tracked throughout, so these frames are not scored (X): the
     # model must not learn "no players = dead ball".
@@ -248,30 +251,37 @@ def arrays_and_labels(match_id, labels="phase"):
     return arrays, labels
 
 
-def input_file(match_id, seed, labels="phase", touch=False):
+def input_file(match_id, seed, labels="phase", touch=False, view="edges"):
     """Basename of the cached sequence-model inputs (training CACHE_DIR), as training "aux":
-    sc_* (phase labels) or scc_* (control labels); *_t with the touch inputs."""
+    sc_* (phase labels) or scc_* (control labels); scv_* / sccv_* with the ATD's dead-ball view;
+    *_t with the touch inputs."""
     from ..seq.training import input_name
-    return input_name("{}_{}_s{}".format(LABEL_KINDS[labels], match_id, seed), touch)
+    kind = LABEL_KINDS[labels] + ("v" if view == "atd" else "")
+    return input_name("{}_{}_s{}".format(kind, match_id, seed), touch)
 
 
-def build_inputs(match_id, seed, missing_counts=None, labels="phase", touch=False):
-    """Degrade one match like the external games and cache network inputs + labels."""
+def build_inputs(match_id, seed, missing_counts=None, labels="phase", touch=False, view="edges",
+                 dead_views=None):
+    """Degrade one match like the external games and cache network inputs + labels. view: as
+    dfl.build_inputs ("edges", or "atd" for the competition ATD's dead-ball view)."""
     from . import degrade, metrica
     from ..validation import harness
     from ..seq import network
     from ..seq.training import CACHE_DIR as INPUT_DIR
 
     os.makedirs(INPUT_DIR, exist_ok=True)
-    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels, touch))
+    path = os.path.join(INPUT_DIR, input_file(match_id, seed, labels, touch, view))
     if os.path.exists(path):
         return path
     if missing_counts is None:
         missing_counts = harness._competition_missing_counts()
-    arrays, codes = arrays_and_labels(match_id, labels)
+    if view == "atd" and dead_views is None:
+        from .dfl import _competition_dead_views
+        dead_views = _competition_dead_views()
+    arrays, codes = arrays_and_labels(match_id, labels, hide_dead=view != "atd")
     game = GAME_OFFSET + match_ids().index(match_id)
     degraded = degrade.degrade(arrays, missing_counts, {"seed": seed}, game=game,
-                               live=codes < 2)
+                               live=codes < 2, dead_views=dead_views if view == "atd" else None)
     ctx = metrica.make_context(game, degraded)
     graded = ctx.half_of_frame > 0
     labels = np.where(graded, codes, 3).astype(np.int8)

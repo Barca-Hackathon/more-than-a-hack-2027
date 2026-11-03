@@ -196,6 +196,7 @@ def _team_block(ctx, team, bx, by, bvx, bvy, sign, pvx, pvy):
 
 TEAM_BLOCK = 6 * K_NEAREST + 3 + 5
 BALL_BLOCK = 8
+BALL_SEEN = 0               # the ball block's seen flag (0/1), in the raw inputs
 # Under a team swap (teams exchanged, pitch rotated 180 degrees): per-channel sign, and the two
 # team blocks trade places. Ball: seen, x, y, vx, vy, speed, accel, outside.
 BALL_SWAP = np.array([1, -1, -1, -1, -1, 1, 1, 1], dtype=np.float64)

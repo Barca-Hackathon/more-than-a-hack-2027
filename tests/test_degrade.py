@@ -107,3 +107,33 @@ def test_live_gaps_leave_every_other_degradation_unchanged():
     assert not (~np.isnan(on["ball"][:, 0]) & np.isnan(off["ball"][:, 0])).any()
     again = degrade.degrade(data, counts, {"live_gap_params": params}, game=1, live=live)
     assert np.array_equal(on["ball"], again["ball"], equal_nan=True)
+
+
+def test_dead_ball_view_replays_the_pattern_of_a_stoppage_of_similar_length():
+    short_seen = np.ones(50, dtype=bool)                  # a 2 s stoppage, ball in view
+    long_hidden = np.zeros(1000, dtype=bool)              # a 40 s stoppage, ball gone
+    half = np.r_[np.ones(100, bool), np.zeros(100, bool)]  # 8 s: seen, then gone
+    views = [short_seen, long_hidden, half]
+    dead = np.zeros(3000, dtype=bool)
+    dead[100:160] = True                                  # 2.4 s: nearest is the 2 s view
+    dead[500:1400] = True                                 # 36 s: nearest is the 40 s view
+    dead[2000:2400] = True                                # 16 s: nearest is the 8 s view
+    hide = degrade.dead_ball_view(dead, views, np.random.RandomState(0), nearest=1)
+    assert not hide[~dead].any()
+    assert not hide[100:160].any() and hide[500:1400].all()
+    np.testing.assert_array_equal(hide[2000:2400], np.r_[np.zeros(200, bool), np.ones(200, bool)])
+
+
+def test_dead_ball_views_hide_only_dead_frames_and_leave_the_rest_paired():
+    data = arrays()
+    counts = np.random.RandomState(3).randint(0, 4, size=1000).astype(np.int16)
+    live = np.ones(len(data["ball"]), dtype=bool)
+    live[300:420] = False                                 # one stoppage, ball tracked through it
+    views = [np.r_[np.ones(30, bool), np.zeros(60, bool), np.ones(30, bool)]]
+    on = degrade.degrade(data, counts, {}, game=1, live=live, dead_views=views)
+    off = degrade.degrade(data, counts, {}, game=1, live=live)
+    assert np.array_equal(on["xy"], off["xy"], equal_nan=True)
+    hidden = np.isnan(on["ball"][:, 0]) & ~np.isnan(off["ball"][:, 0])
+    assert hidden.any() and not (hidden & live).any()
+    assert not (~np.isnan(on["ball"][:, 0]) & np.isnan(off["ball"][:, 0])).any()
+    np.testing.assert_array_equal(on["ball"][:250], off["ball"][:250])   # far from the stoppage
