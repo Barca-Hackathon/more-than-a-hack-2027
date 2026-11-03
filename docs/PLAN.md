@@ -36,6 +36,85 @@ scripts/check_reproducibility.sh        # clean copy -> predict twice, validate,
 uv run pytest -q
 ```
 
+## Terminology
+
+The terms and abbreviations used in this plan and the other files in `docs/`.
+
+### The match and its data
+
+| term | meaning |
+|---|---|
+| **BAR–ATH** | The competition match: FC Barcelona (home, `H`) vs Athletic Club (away, `A`), LaLiga 2024–25, matchday 2. The only match we submit labels for, and never a source of labels for training or tuning. |
+| **ATD** | Automatic Tracking Data: Metrica's uncorrected computer-vision tracking of BAR–ATH. It has team-level positions in 46 track slots (no player IDs) and the ball, which is missing on 41% of graded frames. "The ATD" always means BAR–ATH's tracking. |
+| **Smart Tagging** | Metrica's automatic tags of match phases, 638 on BAR–ATH (set pieces, for example). Inferred, not checked by hand. |
+| **frame, graded frame** | The tactical video has 199,319 frames at 25 per second, and the submission has one label per frame. Graded frames are the ones inside the two halves; only they are scored. |
+| **GT** | Ground truth: the organisers' true labels. The **public GT** covers 5 minutes of BAR–ATH (17 possessions) and ships with the repository. The **private GT** covers the whole match, and only the organisers have it. |
+| **GT-free** | Measured on BAR–ATH without any labels, for example how often a method calls `D` while the ball is seen. |
+| **public 5-minute check** | Scoring a submission against the public GT. A correctness alarm, logged after a choice is made and never used to make one (RULES.md). |
+
+### Labels and scores
+
+| term | meaning |
+|---|---|
+| **`H` / `A` / `D` / `X`** | Home team in possession, away team in possession, dead ball (not in play), no answer. |
+| **possession, spell** | A run of frames in which one team has the ball, ended by a turnover or a stoppage. |
+| **stoppage, dead ball, live play** | A stoppage runs from the ball going out of play (over a line, a whistle) to the restart, and is labelled `D`. Everything else is live play. |
+| **IoU** | Intersection over union: the overlap of two time intervals divided by the time they cover together. |
+| **spellF1** | The ranking metric. Predicted possessions are matched one-to-one with true ones by IoU, and F1 is averaged over IoU thresholds 0.3, 0.4, 0.5, 0.6 and 0.7. |
+| **macroF1** | The mean per-frame F1 over `H`, `A` and `D`. The first tie-break. |
+| **label readings: main, alt, old** | Three ways of turning Metrica's events into labels. **main**: a BALL LOST never starts a possession, and a one-touch recovery is not a possession. **alt**: the first rule only, so one-touch recoveries count. **old**: neither rule (the labels before Nov 1). Decoder settings are chosen on the mean of main and alt; old is only reported (see "External validation"). |
+
+### Training and test data
+
+| term | meaning |
+|---|---|
+| **Metrica** (sample data) | Three public matches from Metrica Sports with tracking and event data (github.com/metrica-sports/sample-data); labels come from the events. The only data any setting is chosen on. |
+| **DFL** | Deutsche Fußball Liga, which runs the German Bundesliga. "The DFL matches" are the seven Bundesliga matches of the open IDSSE dataset (Bassek et al., *Scientific Data* 12, 195 (2025), CC BY 4.0): 25 Hz positions, DFL's ball status (alive or dead) and possession flag, and event data. Match IDs J03WMX, J03WN1, J03WOH, J03WOY, J03WPY, J03WQQ, J03WR9. v3 trains on them. |
+| **control labels** (DFL) | DFL's possession flag changes on every touch. The control labels keep a change only if the new team has a control event of its own within ±1.5 s, which matches the Metrica rule (`external/dfl.py`). |
+| **SkillCorner** | 20 matches of open broadcast tracking from the Australian A-League 2024/25 (MIT licence), resampled from 10 to 25 Hz. v3 trains on them too. |
+| **external games** | Every match that is not BAR–ATH: Metrica, DFL and SkillCorner. |
+| **degradation, degradation seed** | `external/degrade.py` makes clean tracking look like the ATD: a smoothed, noisy ball, players dropped at BAR–ATH's rate and ball gaps in live play. Each degradation seed gives a different degraded copy. Metrica uses seeds 0–5 for training and 0–2 for evaluation. |
+| **ATD view, old view ("edges")** | How a degraded DFL or SkillCorner copy shows the ball during stoppages. **ATD view** (since Nov 3): each stoppage copies the seen/unseen pattern of a BAR–ATH stoppage of similar length (files `dflcv_*`, `sccv_*`). **Old view**: the ball is hidden except for the first 0.5 s and last 1 s of each stoppage (files `dflc_*`, `scc_*`). |
+
+### Validation
+
+| term | meaning |
+|---|---|
+| **held out** | Scored on matches that the model never trained on and the settings were never chosen on. |
+| **LOGO** | Leave one game out: for each Metrica game, train and choose settings on the other two, then score that game. The three scores are averaged. |
+| **held-out DFL** | DFL matches left out of a network's training and then scored: a second test set beside Metrica. Metrica barely tracks the ball while it is dead, so it cannot test how a network handles a stoppage with the ball in view; DFL can. Each LOGO fold also holds out a group of DFL matches (`DFL_FOLDS` in `scripts/kaggle_seq.py`): Metrica game 1 goes with J03WMX, J03WN1 and J03WOH, game 2 with J03WOY and J03WPY, game 3 with J03WQQ and J03WR9. So every DFL match is scored by networks that never saw it. It decided the Nov 3 dead-ball change (see "Dead ball with the ball in view"); the shipped networks train on all seven. |
+| **training seed** | The random seed of one network's training. Networks that differ only in it score within about ±0.005 spellF1 of each other. |
+| **seed sd** | The spread of a 3-game mean score across degradation seeds. |
+| **ablation** | Scoring the pipeline with one part removed or changed ([`docs/ABLATION.md`](ABLATION.md)). |
+| **paired bootstrap, 90% interval** | True possessions are resampled with the same draws for both methods, which gives an interval for the difference between them. A difference whose interval includes 0 is not established. |
+| **noise floor** | The smallest difference that means something: ~0.007 spellF1 across degradation seeds (v2), ±0.005 across one network's training seeds, ±0.008 between ensembles of the same recipe. |
+
+### The pipeline
+
+| term | meaning |
+|---|---|
+| **v1, v2, v3** | Successive methods in `pipeline.py`. **v1**: the dead-ball and restart stages, with nearest-player team evidence. **v2**: v1 plus the learned control model. **v3**: the sequence-model ensemble, submitted since Nov 2. |
+| **stage** | A step of v1 and v2 that writes per-frame evidence: ball cleaning, dead ball, restart team, control. |
+| **dead-ball stage** | `stages/deadball.py` and `stages/hmm2.py`. Frames that are dead for certain (ball over a line, before a kickoff) pin a live/dead HMM fitted on this match, and its runs become stoppages. v3 reads its outputs as inputs. |
+| **HMM, EM** | Hidden Markov model; expectation–maximisation, which fits one without labels. |
+| **restart-team evidence** | Which team takes each restart, from the nearest player, Smart Tagging, the last touch before a ball-out and kickoffs (`stages/restart.py`). Off in v3 (`w_restart` 0). |
+| **control model** | `stages/control.py` (`models/control_v1.json`): a team-symmetric logistic model of which team controls the ball, frame by frame. |
+| **sequence model, network** | `seq/network.py`: a temporal CNN that reads 123 per-frame inputs with a ±12 s view and gives log P(H), log P(A) and log P(D) for every frame. Trained on a Kaggle GPU. |
+| **ensemble, member** | The 8 shipped networks (`models/seq_v3_*.json`), whose log-probabilities are averaged. The members are training seeds 0–6 (`s0`…`s6`) and the own-head variant (`own`). |
+| **own-head variant** | A member whose DFL and SkillCorner labels train a second output head instead of the main one. |
+| **touch channels** | 12 of v3's 123 inputs, 6 per team: the ball's owner is the closest player within 2 m, and the channels give how long the current touch spell has lasted, the time since the last spell and until the next, those spells' lengths, and how many players touched the ball within ±3 s. |
+| **decoder** | The Viterbi search over `H`/`A`/`D` (`stages/decode.py`) that turns per-frame evidence into labels. Its settings: **switch**, the penalty for `H`↔`A`; **stop**, for the ball going dead; **restart**, for play resuming; **w_seq**, the weight on the network's log-probabilities; and `min_dead_s`, the shortest stoppage (1 s). v3's are `pipeline.V3_DEFAULTS`. |
+| **freeze, re-freeze** | Fixing the submission method with its weights and settings, and recording the sha256 hash of its output file (see "Freeze and reproducibility"). |
+
+### Project names
+
+| term | meaning |
+|---|---|
+| **P1–P5** | The five workstreams (see "Workstreams"). |
+| **M0–M3** | The milestones (see "Milestones"). |
+| **Kaggle kernel** | A script that runs on Kaggle's free GPUs (a T4), built by `scripts/kaggle_seq.py`. `v3-heldout` kernels write held-out log-probabilities (`lp_*.npz`); `v3-final` kernels write the shipped networks. |
+| **input files** | Cached sequence-model inputs in `.cache/seq_inputs/`: `s{seed}_g{game}` for Metrica, `dflc_` / `dflcv_` for DFL (old / ATD view), `scc_` / `sccv_` for SkillCorner. A `_t` suffix means the touch channels are included. |
+
 ## Context
 
 The task is to label all 199,319 frames of the tactical video of BAR–ATH with `H`/`A`/`D`/`X`. The board ranks on **spellF1**: predicted possessions are matched one-to-one with true ones by temporal IoU, and F1 is averaged over IoU 0.3–0.7. **macroF1** breaks ties. The floor to beat is `baseline_smooth50` at spellF1 0.2433 on the full match. It assigns each frame to the team of the nearest player and then takes a ±2 s majority vote.
