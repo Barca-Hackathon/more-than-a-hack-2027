@@ -109,8 +109,20 @@ def view_jobs(arm, seeds):
 
 
 KERNEL = r'''
-import glob, json, os, sys, time
+import builtins, faulthandler, glob, json, os, sys, time
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+# A session once hung mid-training and held its GPU for 8 hours. Every log line re-arms this
+# watchdog; after STALL_S without one it dumps every thread's stack and ends the process (a C-level
+# timer, so it fires even if the hang holds the GIL). The longest normal silence is ~5 min.
+STALL_S = 1200
+
+
+def print(*args, **kwargs):
+    faulthandler.dump_traceback_later(STALL_S, exit=True)
+    return builtins.print(*args, **kwargs)
+
+
+faulthandler.dump_traceback_later(STALL_S, exit=True)
 import numpy as np
 SOURCES = __SOURCES__
 JOBS = __JOBS__
@@ -237,6 +249,7 @@ for job in JOBS:
     if extra:
         np.savez(os.path.join(WORK, "lp_{}_extra.npz".format(tag)), **extra)
 print("ALL DONE", flush=True)
+faulthandler.cancel_dump_traceback_later()
 '''
 
 
