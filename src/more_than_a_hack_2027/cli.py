@@ -162,6 +162,23 @@ def _cmd_ablate(args):
     return 0
 
 
+def _cmd_robust(args):
+    import warnings
+
+    from .validation import robustness
+
+    warnings.simplefilter("ignore", RuntimeWarning)
+    robustness.run(tuple(args.audits or ()))
+    text = robustness.markdown()
+    if args.out:
+        with open(args.out, "w") as handle:
+            handle.write(text)
+        print("wrote {}".format(args.out))
+    else:
+        print(text)
+    return 0
+
+
 def _cmd_tune(args):
     import warnings
 
@@ -330,6 +347,15 @@ def build_parser():
     p.add_argument("--out", help="write the Markdown table here (e.g. docs/ABLATION.md)")
     p.add_argument("--csv", help="also write the per-(row, seed, game) scores (keep it in .cache/)")
     p.set_defaults(func=_cmd_ablate)
+    p = sub.add_parser("robust",
+                       help="GT-free robustness audits of the frozen v3 (docs/ROBUSTNESS.md)")
+    p.add_argument("--audits", nargs="*", default=None,
+                   choices=("bytes", "margin", "anchors", "inputs", "perturb", "support", "ridge"),
+                   help="audits to (re)run; without it the report is rendered from the results "
+                        "kept in .cache/robust/")
+    p.add_argument("--out", help="write the Markdown report here (e.g. docs/ROBUSTNESS.md)")
+    p.set_defaults(func=_cmd_robust)
+
     p = sub.add_parser("train-seq",
                        help="train the v3 sequence model on the degraded Metrica games (torch)")
     p.add_argument("--out", default=None, help="model JSON (default: .cache/seq_local.json; the shipped "

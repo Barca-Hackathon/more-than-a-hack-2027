@@ -29,6 +29,7 @@ uv run more-than-a-hack-2027 eval-external              # Metrica games, clean +
 uv run more-than-a-hack-2027 eval-external --describe   # also the label and input statistics per game
 uv run more-than-a-hack-2027 tune --jobs 3 --out docs/TUNING.md   # choose w_control / switch, 3 seeds (~5 min)
 uv run more-than-a-hack-2027 ablate --out docs/ABLATION.md   # held-out ablation table, 3 seeds (~5 min)
+uv run more-than-a-hack-2027 robust --out docs/ROBUSTNESS.md   # robustness report from cached audits (--audits … re-runs them)
 uv run python scripts/kaggle_seq.py v3-heldout --push   # held-out v3 networks on a Kaggle GPU (~2 h)
 uv run python scripts/kaggle_seq.py v3-final --push     # the shipped v3 ensemble on a Kaggle GPU (~1 h)
 uv run more-than-a-hack-2027 owner-targets              # v3's training-only targets from the clean tracking
@@ -658,6 +659,29 @@ Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected label
 Nothing was removed. Every component either helps or is within noise.
 
 **v3** (rows added Nov 2, updated at the Nov 3 and Nov 12 re-freezes): the 8-network ensemble is +0.184 [+0.165, +0.205] over v2, and the training-seed-0 network alone +0.185 [+0.166, +0.206] (the other seeds score 0.843–0.851 alone). The reference rows "v3 as frozen on Nov 2", decoded at its own settings, and "v3 as frozen on Nov 3" are +0.176 [+0.155, +0.198] and +0.177 [+0.157, +0.198]. The v2 rows above still describe the features v3 reads through control.py and the dead-ball stage. v3 has no per-input ablation yet: each one needs several GPU-trained networks to rise above the ±0.005 seed noise.
+
+## Robustness (Nov 13–14)
+
+Every held-out number says how v3 does on a match like the training matches. These audits ask where BAR-ATH is unlike them, and whether another machine writes the same file. They are GT-free on BAR-ATH, and each has the same measurement on held-out Metrica (and DFL where it applies) as a baseline. Tables: [`docs/ROBUSTNESS.md`](ROBUSTNESS.md), from `uv run more-than-a-hack-2027 robust --audits … --out docs/ROBUSTNESS.md` (`validation/robustness.py`; without `--audits` it renders the cached results).
+
+**Rule, stated before the runs.** A fix ships only if (1) the failure is measured on BAR-ATH and is clearly outside what held-out Metrica and DFL show, (2) held out it costs no more than 0.005 spellF1 on Metrica (3 games × 3 seeds, main and alt labels) or DFL, and (3) it moves the GT-free measure it targets. The mean is not chased. The public 5 minutes are scored once after a re-freeze, as an alarm only.
+
+| audit | BAR-ATH | held-out baseline | verdict |
+|---|---|---|---|
+| Same bytes on another machine | 8 of 8 BLAS settings (1 / 4 / default threads; Haswell, SkylakeX, Zen, Sandybridge, Nehalem kernels) write sha256 `2725f912…` | | **no failure.** Rounding the log-probabilities is not needed |
+| Decode margin | no label changes under noise up to 1e-6 on the log-probabilities; BLAS differences are ~1e-12 | | no failure |
+| Dead-ball anchors called live | 29.2% of anchor frames | Metrica 21.0% (anchors 79% truly dead), DFL 4.7% | pinning all anchors **rejected**: Metrica −0.026, DFL −0.004 |
+| Stage stoppages v3 rides through | 45 of 142 | Metrica 213 of 998, of which 18 truly dead; DFL 216 of 892, 10 truly dead | no failure: where the two disagree, v3 is right 93% of the time |
+| **Wait before the second-half kickoff** | **63% called live, 6 possessions**, in 117 s that FAQ.md says are all `D` | waits of this kind elsewhere: at most 7% live | **failure; fix below** |
+| Inputs outside the training range | 3 of 123 channels: visible players per team (the ATD shows 12+ tracks for one team on 8% / 5% of frames), `ball.y` 1.7% | | capping the count at 11 changes 1 possession (agreement 0.998): **no fix** |
+| Left–right mirror, track order, 5 Hz grid phase | agreement 0.951 / 1.000 / 1.000 | Metrica 0.945 / 0.997 / 0.994–0.998 | no failure. Averaging the 5 grid phases changes nothing: not adopted |
+| Added tracking noise | ball 0.1 m: 0.863; players 0.1 m: 0.847, dead share 45.3% → 38.4% | Metrica 0.931 and 0.927 (true −0.003 and −0.023) | BAR-ATH is more sensitive, but its own tracks are not that noisy (below): **no retraining** |
+| More players or ball frames missing | 0.946–0.979 | Metrica 0.939–0.973 | no failure |
+| Networks agreeing per possession | all 8 on 83.0%; expected precision at IoU 0.5 82.4% | 90.8%; 86.8% | report only: BAR-ATH is somewhat harder than the held-out games |
+| Equally good decoder settings | agreement 0.957–0.986, 205–230 possessions | Metrica 0.960–0.999 | no failure |
+
+- **Tracking noise.** The sensitivity is to noise added on top of the tracking. BAR-ATH's ball track is slightly rougher than Metrica's (median second difference 0.009 m against 0.005–0.007 m, which is about 2 mm of extra noise per frame), and its player tracks are smoother (0.0014 m against 0.0023–0.0029 m). Nothing shows noise of 0.05 m or more in the match, so the rule's first condition fails and jitter augmentation was not trained. It stays a known weakness for the tech doc (also seen against GTT's harness on Nov 4).
+- **Why the anchors are not pinned.** v3 reads the anchors as an input and overrules them where they are wrong, which on Metrica is 21% of the time. Forcing them costs 0.026.
 
 ## Workstreams (5 people)
 
