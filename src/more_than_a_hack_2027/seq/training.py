@@ -45,6 +45,13 @@ TRAIN_DEFAULTS = {
     "aux_until": 1.0,       # share of the steps that use it; the rest fine-tune on the main data
     "aux_head": "own",      # "own": learned through a second output head; "main": the aux labels
                             # are the same kind as the main ones, so they train the main head
+    # Training-only heads on extra targets, carried by a block as a sixth item, a dict
+    # {EXTRA_TARGETS name: (n,) codes}; a target a block lacks is skipped for its frames.
+    "owner_weight": 0.0,    # "owner": who is on the ball in the clean tracking (owner_target)
+    "reading_weight": 0.0,  # "alt", "old": the other readings of Metrica's events (tune.LABELS),
+                            # in which a one-touch recovery (and a BALL LOST) starts a possession
+    "touch_weight": 0.0,    # "last", "next": the team of the latest / next clean owner
+                            # (last_next_owner), derived from "owner"
 }
 CACHE_DIR = os.path.join(_paths.CACHE_DIR, "seq_inputs")
 
@@ -76,6 +83,111 @@ def load_cached(name):
     z = np.load(os.path.join(CACHE_DIR, name))
     return (z["X"], z["swap_sign"], z["labels"], z["graded"],
             tuple(tuple(int(v) for v in row) for row in z["halves"]))
+
+
+OWNER_RADIUS_M = 1.5
+OWNER_NONE, OWNER_UNKNOWN = 2, -100
+# every one has classes 0 home, 1 away, 2 neither
+EXTRA_TARGETS = ("owner", "alt", "old", "last", "next")
+
+
+def extra_heads(cfg):
+    """The EXTRA_TARGETS trained under cfg, with their loss weights."""
+    weights = {"owner": cfg["owner_weight"], "alt": cfg["reading_weight"],
+               "old": cfg["reading_weight"], "last": cfg["touch_weight"],
+               "next": cfg["touch_weight"]}
+    return [(k, float(weights[k])) for k in EXTRA_TARGETS if weights[k]]
+
+
+def owner_target(arrays, radius=OWNER_RADIUS_M):
+    """(n,) int8 from CLEAN tracking (metrica.load_arrays layout, before degrade): the team (0
+    home, 1 away) of the player closest to the ball when within `radius`, OWNER_NONE when nobody
+    is, OWNER_UNKNOWN where the clean ball is not tracked.
+
+    A training-only target ("owner_weight"). The degraded inputs blur who is on the ball: the
+    ball is smoothed and noisy, the player on it may be dropped, and it is hidden in gaps. The
+    clean tracking still knows, for every match and whatever its possession labels mean, so a
+    second head learns to recover it and the trunk learns to read through the degradation."""
+    ball = np.asarray(arrays["ball"], dtype=np.float64)[:, :2]
+    xy = np.asarray(arrays["xy"], dtype=np.float64)
+    team = np.asarray(arrays["team_of_slot"])
+    with np.errstate(invalid="ignore"):
+        d = np.hypot(xy[..., 0] - ball[:, 0:1], xy[..., 1] - ball[:, 1:2])
+    d = np.where(np.isnan(d), np.inf, d)
+    j = np.argmin(d, axis=1)
+    out = np.where(d[np.arange(len(d)), j] <= radius, team[j], OWNER_NONE).astype(np.int8)
+    out[np.isnan(ball[:, 0])] = OWNER_UNKNOWN
+    return out
+
+
+def last_next_owner(owner, halves):
+    """(last, next): per frame, the team of the latest (next) frame with an owner in the same
+    half, OWNER_UNKNOWN before the first (after the last) one and where the clean ball is not
+    tracked. The clean tracking's "who touched it last" and "who touches it next"."""
+    owner = np.asarray(owner)
+    last = np.full(len(owner), OWNER_UNKNOWN, dtype=np.int64)
+    nxt = last.copy()
+    for _, first, stop in halves:
+        seg = owner[first:stop + 1]
+        idx = np.arange(len(seg))
+        owned = (seg == 0) | (seg == 1)
+        prev = np.maximum.accumulate(np.where(owned, idx, -1))
+        following = np.minimum.accumulate(np.where(owned, idx, len(seg))[::-1])[::-1]
+        known = seg != OWNER_UNKNOWN
+        last[first:stop + 1] = np.where(known & (prev >= 0), seg[np.maximum(prev, 0)],
+                                        OWNER_UNKNOWN)
+        nxt[first:stop + 1] = np.where(known & (following < len(seg)),
+                                       seg[np.minimum(following, len(seg) - 1)], OWNER_UNKNOWN)
+    return last, nxt
+
+
+def owner_file(name):
+    """The owner-target file of an input file: one per match, shared by its degradation seeds
+    (s3_g2_t.npz -> own_g2.npz, dflcv_J03WMX_s0_t.npz -> own_dfl_J03WMX.npz, sccv_123_s1_t.npz
+    -> own_sc_123.npz)."""
+    base = name[:-len(".npz")]
+    base = base[:-2] if base.endswith("_t") else base
+    kind, _, rest = base.partition("_")
+    if kind.startswith("dfl"):
+        return "own_dfl_{}.npz".format(rest.rsplit("_s", 1)[0])
+    if kind.startswith("sc"):
+        return "own_sc_{}.npz".format(rest.rsplit("_s", 1)[0])
+    return "own_{}.npz".format(rest)
+
+
+def load_extra_targets(path):
+    """{EXTRA_TARGETS name: codes} from an own_*.npz file."""
+    with np.load(path) as z:
+        return {"owner": z["O"], **{k: z[k] for k in ("alt", "old") if k in z.files}}
+
+
+def build_owner_targets(log=print):
+    """Write own_*.npz for every Metrica, DFL and SkillCorner match into CACHE_DIR: key O, the
+    owner target, and for a Metrica game keys alt and old, its labels under the other readings."""
+    from ..external import dfl, metrica, skillcorner
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    from ..validation import tune
+    jobs = [("own_g{}.npz".format(g), lambda g=g: metrica.load_arrays(g)) for g in metrica.GAMES]
+    jobs += [("own_dfl_{}.npz".format(m), lambda m=m: dfl.arrays_and_labels(m, hide_dead=False)[0])
+             for m in dfl.MATCHES]
+    jobs += [("own_sc_{}.npz".format(m),
+              lambda m=m: skillcorner.arrays_and_labels(m, "control", hide_dead=False)[0])
+             for m in skillcorner.match_ids()]
+    for name, load in jobs:
+        path = os.path.join(CACHE_DIR, name)
+        if not os.path.exists(path):
+            arrays = load()
+            target = owner_target(arrays)
+            readings = {}
+            if name.startswith("own_g"):                 # a Metrica game: its other readings
+                game = int(name[len("own_g"):-len(".npz")])
+                readings = {k: metrica.load_game(game, arrays=arrays, rules=tune.LABELS[k]).labels
+                            .astype(np.int8) for k in ("alt", "old")}
+            np.savez_compressed(path, O=target, **readings)
+            if log:
+                known = target != OWNER_UNKNOWN
+                log("{}: {} frames, ball tracked {:.0%}, owned {:.0%} of those".format(
+                    name, len(target), known.mean(), (target[known] != OWNER_NONE).mean()))
 
 
 def _net(cin, cfg, heads=1):
@@ -151,15 +263,25 @@ def _sequences(blocks, cfg):
     unscored. The swapped copy shares X and is swapped crop by crop (swap = its swap_sign), which
     halves the memory and gives the same numbers."""
     seqs = []
-    for X, swap_sign, labels, graded, halves in blocks:
+    for X, swap_sign, labels, graded, halves, *more in blocks:
         y = np.where(graded & (labels < 3), labels, -100).astype(np.int64)
         ys = y.copy()
         ys[y == 0], ys[y == 1] = 1, 0
+        targets = dict(more[0]) if more else {}
+        if cfg["touch_weight"] and "owner" in targets:
+            targets["last"], targets["next"] = last_next_owner(targets["owner"], halves)
+        o = np.full((len(y), len(EXTRA_TARGETS)), OWNER_UNKNOWN, dtype=np.int64)
+        for k, name in enumerate(EXTRA_TARGETS):
+            if name in targets:
+                t = np.asarray(targets[name]).astype(np.int64)
+                o[:, k] = np.where(graded & (t >= 0) & (t < 3), t, OWNER_UNKNOWN)
+        os_ = o.copy()
+        os_[o == 0], os_[o == 1] = 1, 0
         for _, first, last in halves:
             part = slice(first, last + 1)
             w = _weights(y[part], cfg)
-            seqs.append((X[part], y[part], w, None))
-            seqs.append((X[part], ys[part], w, swap_sign))
+            seqs.append((X[part], y[part], w, None, o[part]))
+            seqs.append((X[part], ys[part], w, swap_sign, os_[part]))
     return seqs
 
 
@@ -192,33 +314,40 @@ def train(blocks, cfg=None, log=print, meta=None, device="cpu"):
     cin = seqs[0][0].shape[1]
     geo = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
     scale = np.ones(cin)
-    rest = np.concatenate([x[:, geo:] for x, _, _, _ in seqs[::2]]).astype(np.float64)
+    rest = np.concatenate([q[0][:, geo:] for q in seqs[::2]]).astype(np.float64)
     scale[geo:] = np.sqrt((rest ** 2).mean(axis=0)) + 1e-3
     del rest
     scale32 = scale.astype(np.float32)
 
-    net = _net(cin, cfg, heads).to(device)
+    extras = extra_heads(cfg)                       # their heads follow the label heads
+    net = _net(cin, cfg, heads + len(extras)).to(device)
     opt = torch.optim.AdamW(net.parameters(), lr=cfg["lr"], weight_decay=cfg["weight_decay"])
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=cfg["lr"], total_steps=cfg["steps"],
                                                 pct_start=0.1)
+    for name, _ in extras:                           # a requested head must have something to learn
+        k = EXTRA_TARGETS.index(name)
+        if not any((q[4][:, k] != OWNER_UNKNOWN).any() for q in seqs + aux):
+            raise ValueError("no block carries the {!r} target (see EXTRA_TARGETS)".format(name))
     pools = [seqs] + ([aux] if aux else [])
     probs = []
     for pool in pools:
-        lengths = np.array([len(x) for x, _, _, _ in pool], dtype=np.float64)
+        lengths = np.array([len(q[0]) for q in pool], dtype=np.float64)
         probs.append(lengths / lengths.sum())
     crop = int(cfg["crop"])
     mirror = _mirror(cfg, cin)
     net.train()
     for step in range(int(cfg["steps"])):
-        xb, yb, wb, hb = [], [], [], []
+        xb, yb, wb, hb, ob = [], [], [], [], []
         aux_p = cfg["aux_p"] if step < cfg["aux_until"] * cfg["steps"] else 0.0
         for _ in range(int(cfg["batch"])):
             k = int(bool(aux) and rng.rand() < aux_p)
             pool = pools[k]
-            x, y, w, sign = pool[rng.choice(len(pool), p=probs[k])]
+            x, y, w, sign, o = pool[rng.choice(len(pool), p=probs[k])]
             hb.append(k if heads > 1 else 0)
             start = rng.randint(0, max(1, len(x) - crop))
             xs, ys, ws = x[start:start + crop], y[start:start + crop], w[start:start + crop]
+            ob.append(np.pad(o[start:start + crop], ((0, crop - len(xs)), (0, 0)),
+                             constant_values=OWNER_UNKNOWN))
             if sign is not None:
                 xs = network.swap(xs, sign)
             if mirror is not None and rng.rand() < 0.5:
@@ -236,13 +365,22 @@ def train(blocks, cfg=None, log=print, meta=None, device="cpu"):
         if cfg["input_noise"] > 0:
             xb = xb + cfg["input_noise"] * torch.randn(xb.shape)
         xb, yb, wb = xb.to(device), yb.to(device), wb.to(device)
-        logits = net(xb)
+        out = net(xb)
+        logits = out[:, :3 * heads]
         if heads > 1:
             rows = torch.arange(len(hb), device=device)
             logits = logits.view(len(hb), heads, 3, -1)[rows, torch.tensor(hb, device=device)]
         per_frame = F.cross_entropy(logits, yb, ignore_index=-100, reduction="none")
         valid = (yb != -100).float() * wb
         loss = (per_frame * valid).sum() / valid.sum().clamp(min=1.0)
+        if extras:
+            ot = torch.from_numpy(np.stack(ob)).to(device)
+            for j, (name, weight) in enumerate(extras):
+                target = ot[:, :, EXTRA_TARGETS.index(name)]
+                if (target != OWNER_UNKNOWN).any():
+                    first = 3 * (heads + j)
+                    loss = loss + weight * F.cross_entropy(out[:, first:first + 3], target,
+                                                           ignore_index=OWNER_UNKNOWN)
         opt.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -254,7 +392,8 @@ def train(blocks, cfg=None, log=print, meta=None, device="cpu"):
     weights = {k: v.detach().cpu().numpy().astype(np.float64)
                for k, v in net.state_dict().items()}
     arch = {"stride": cfg["stride"], "channels": cfg["channels"],
-            "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"]), "heads": heads,
+            "dilations": list(cfg["dilations"]), "flip_tta": bool(cfg["flip"]),
+            "heads": heads + len(extras),
             "touch": network.has_touch(cin)}
     info = {k: (list(v) if isinstance(v, tuple) else v) for k, v in cfg.items()}
     info.update(meta or {})

@@ -16,8 +16,9 @@ with the same draws for every row and seed, so the noise the rows share cancels 
 The v3 rows (the sequence model) decode held-out log-probabilities computed on a Kaggle GPU:
 `scripts/kaggle_seq.py v3-heldout` writes lp_seq_v3_*.npz, kept in .cache/seq_heldout/ (each game
 predicted by networks trained on the other two). They are decoded at pipeline.V3_DEFAULTS. Without
-those files the v3 rows are left out. Row v3-nov2 reads the runs of the Nov 2 recipe, renamed
-lp_seq_v3_nov2_*.npz when the recipe changed.
+those files the v3 rows are left out. Rows v3-nov2 and v3-nov3 read the runs of the recipes
+frozen on those days, renamed lp_seq_v3_nov2_*.npz and lp_seq_v3_nov3_*.npz when the recipe
+changed.
 """
 
 import os
@@ -40,6 +41,8 @@ V3_MEMBERS = tuple("seq_v3_s{}".format(s) for s in range(7)) + ("seq_v3_own",)
 # v3 as frozen on Nov 2, before the DFL and SkillCorner inputs showed the ball while dead: the same
 # runs, kept as lp_seq_v3_nov2_*.npz
 V3_NOV2_MEMBERS = tuple(name.replace("seq_v3_", "seq_v3_nov2_") for name in V3_MEMBERS)
+# v3 as frozen on Nov 3, before the clean-owner head: kept as lp_seq_v3_nov3_*.npz
+V3_NOV3_MEMBERS = tuple(name.replace("seq_v3_", "seq_v3_nov3_") for name in V3_MEMBERS)
 
 
 def feature_groups(cfg=None):
@@ -93,6 +96,8 @@ ROWS = (
     Row("v3-nov2", "v3 as frozen on Nov 2 (DFL and SkillCorner inputs hide the ball while dead; "
         "its own decoder, w_seq 0.5)", "v3", cfg={"w_seq": 0.5}, logprobs=V3_NOV2_MEMBERS,
         section="Reference"),
+    Row("v3-nov3", "v3 as frozen on Nov 3 (the same networks trained without the clean-owner "
+        "head; the same decoder)", "v3", logprobs=V3_NOV3_MEMBERS, section="Reference"),
 )
 
 

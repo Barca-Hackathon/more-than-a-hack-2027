@@ -333,3 +333,84 @@ def test_named_held_out_files_are_scored_against_their_cached_labels(tmp_path, m
     assert sorted(lps) == ["toy_s0"]
     row = tuning.score_named(lps).iloc[0]
     assert row["spell_f1_mean"] == 1.0 and row["dead_seen_recall"] == 1.0
+
+
+# -- training-only targets from the clean tracking ---------------------------------------------
+
+def test_owner_target_names_the_team_of_the_closest_player_within_reach():
+    from more_than_a_hack_2027.seq import training
+
+    xy = np.full((4, 3, 2), np.nan)
+    xy[:, 0] = (10.0, 10.0)                      # home
+    xy[:, 1] = (13.0, 10.0)                      # away
+    xy[:, 2] = (40.0, 40.0)                      # away, far
+    ball = np.array([[10.5, 10.0], [12.4, 10.0], [11.6, 10.0], [np.nan, np.nan]])
+    arrays = {"xy": xy, "ball": ball, "team_of_slot": np.array([0, 1, 1])}
+    np.testing.assert_array_equal(
+        training.owner_target(arrays, radius=1.0),
+        [0, 1, training.OWNER_NONE, training.OWNER_UNKNOWN])
+
+
+def test_last_and_next_owner_stay_inside_a_half_and_skip_untracked_frames():
+    from more_than_a_hack_2027.seq import training
+
+    U, N = training.OWNER_UNKNOWN, training.OWNER_NONE
+    owner = np.array([N, 0, N, 1, U, N, N, 1, N])
+    last, nxt = training.last_next_owner(owner, ((1, 0, 5), (2, 6, 8)))
+    np.testing.assert_array_equal(last, [U, 0, 0, 1, U, 1, U, 1, 1])
+    np.testing.assert_array_equal(nxt, [0, 0, 1, 1, U, U, 1, 1, U])
+
+
+@pytest.mark.parametrize("name, expected", [
+    ("s3_g2_t.npz", "own_g2.npz"),
+    ("s0_g1.npz", "own_g1.npz"),
+    ("dflcv_J03WMX_s0_t.npz", "own_dfl_J03WMX.npz"),
+    ("sccv_1886347_s2_t.npz", "own_sc_1886347.npz"),
+])
+def test_owner_file_is_shared_by_the_degradation_seeds_of_a_match(name, expected):
+    from more_than_a_hack_2027.seq import training
+
+    assert training.owner_file(name) == expected
+
+
+def test_extra_training_heads_follow_the_label_heads_and_leave_predictions_three_way():
+    pytest.importorskip("torch")
+    from more_than_a_hack_2027.seq import training
+
+    rng = np.random.RandomState(4)
+    block = _training_block(0)
+    targets = {k: rng.randint(0, 3, 300) for k in ("owner", "alt", "old")}
+    cfg = {"channels": 8, "dilations": (1, 2), "steps": 2, "batch": 2, "crop": 100, "threads": 1,
+           "owner_weight": 0.5, "touch_weight": 0.5, "reading_weight": 0.5}
+    assert [k for k, _ in training.extra_heads(dict(training.TRAIN_DEFAULTS, **cfg))] == list(
+        training.EXTRA_TARGETS)
+    # a block without targets trains too: its frames are skipped by the extra heads
+    model = training.train([block + (targets,), _training_block(1)], cfg, log=None)
+    assert model.arch["heads"] == 1 + len(training.EXTRA_TARGETS)
+    assert model.weights["head.3.weight"].shape[0] == 3 * model.arch["heads"]
+    lp = model.forward(_training_block(2)[0])
+    assert lp.shape == (300, 3) and np.allclose(np.exp(lp).sum(axis=1), 1.0)
+
+
+def test_the_team_swap_exchanges_home_and_away_in_the_extra_targets():
+    from more_than_a_hack_2027.seq import training
+
+    block = _training_block(0)
+    owner = np.random.RandomState(1).randint(0, 3, 300)
+    cfg = dict(training.TRAIN_DEFAULTS, owner_weight=1.0)
+    seqs = training._sequences([block + ({"owner": owner},)], cfg)
+    k = training.EXTRA_TARGETS.index("owner")
+    plain, swapped = seqs[0][4][:, k], seqs[1][4][:, k]
+    np.testing.assert_array_equal(plain, owner[:150])
+    np.testing.assert_array_equal(swapped, np.array([1, 0, 2])[owner[:150]])
+    assert (seqs[0][4][:, training.EXTRA_TARGETS.index("alt")] == training.OWNER_UNKNOWN).all()
+
+
+def test_an_extra_head_without_any_target_is_refused():
+    pytest.importorskip("torch")
+    from more_than_a_hack_2027.seq import training
+
+    cfg = {"channels": 8, "dilations": (1, 2), "steps": 1, "batch": 2, "crop": 100, "threads": 1,
+           "owner_weight": 0.5}
+    with pytest.raises(ValueError, match="owner"):
+        training.train([_training_block(0)], cfg, log=None)

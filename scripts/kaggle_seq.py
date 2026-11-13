@@ -3,6 +3,7 @@
     uv run python scripts/kaggle_seq.py v3-final --push      # the shipped ensemble (models/seq_v3_*)
     uv run python scripts/kaggle_seq.py v3-heldout-01 --push # held-out runs of members s0 and s1
     uv run python scripts/kaggle_seq.py dbv-atd-01 --push    # the dead-ball view experiment
+    uv run python scripts/kaggle_seq.py x-flip-01 --push     # an experiment on the v3 recipe
 
 v3-MODE[-MEMBERS] trains the v3 recipe's members (digits: training seeds, "o": the own-head
 variant; all eight when omitted) in mode "final" or "heldout".
@@ -25,6 +26,9 @@ data may not be redistributed):
     mtah-seq-view        DFL (seeds 0-5) and SkillCorner (seeds 0-2) with the ball shown while
                          dead as in the competition ATD's stoppages (dflcv_*_t, sccv_*_t; full
                          inputs, touch included)
+    mtah-seq-own         training-only targets (own_*.npz, training.build_owner_targets): who is on
+                         the ball in each match's clean tracking, and the Metrica games' labels
+                         under the other readings of their events
 
 They are the files `train-seq`, `dfl-inputs --labels control` and `skillcorner-inputs --labels
 control` (each with and without --touch) write to .cache/seq_inputs/, compressed. The degraded
@@ -51,7 +55,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PKG = os.path.join(REPO, "src", "more_than_a_hack_2027")
 USER = os.environ.get("MTAH_KAGGLE_USER", "mertkamberov")
 DATASETS = [USER + "/mtah-seq-inputs", USER + "/mtah-seq-dflc-extra", USER + "/mtah-seq-scc",
-            USER + "/mtah-seq-touch", USER + "/mtah-seq-view"]
+            USER + "/mtah-seq-touch", USER + "/mtah-seq-view", USER + "/mtah-seq-own"]
 
 # The shipped v3 recipe (docs/TUNING_V3.md): the Metrica games plus the open DFL (control labels,
 # 6 degradation seeds) and SkillCorner (one-touch labels, 3 seeds) matches on the main head, half
@@ -59,7 +63,10 @@ DATASETS = [USER + "/mtah-seq-inputs", USER + "/mtah-seq-dflc-extra", USER + "/m
 # V3_VIEW is how those matches show the ball while it is dead: "atd" replays the competition ATD's
 # stoppages (external/degrade.py, dead_ball_view), as chosen by the dead-ball view experiment
 # below; "edges" hides it except at the edges, the recipe frozen on 2026-11-02.
-V3_RECIPE = {"short_weight": 2.0, "turn_weight": 1.0, "steps": 3200, "aux_head": "main"}
+# Since 2026-11-12 a second, training-only head also learns who is on the ball in each match's
+# clean tracking (training.owner_target; the "own" experiment below).
+V3_RECIPE = {"short_weight": 2.0, "turn_weight": 1.0, "steps": 3200, "aux_head": "main",
+             "owner_weight": 0.5}
 V3_SEEDS = (0, 1, 2, 3, 4, 5, 6)
 V3_VIEW = "atd"
 
@@ -104,8 +111,36 @@ def view_jobs(arm, seeds):
         eval_by_game[g] = [dfl.input_file(m, s, "control", True, view)
                            for view in ("atd", "edges") for m in test_dfl for s in range(3)]
     return [{"tag": "dbv_{}_s{}".format(arm, s), "touch": True, "mode": "heldout",
-             "cfg": dict(V3_RECIPE, seed=s), "aux_by_game": aux_by_game,
+             "cfg": dict(V3_RECIPE, seed=s, owner_weight=0.0), "aux_by_game": aux_by_game,
              "eval_by_game": eval_by_game} for s in seeds]
+
+
+# Experiments on top of the v3 recipe, each scored like the dead-ball view experiment: held-out
+# Metrica games, and the DFL matches held out with each of them (DFL_FOLDS). The reference arm is
+# dbv-atd (the v3 recipe as shipped on 2026-11-03).
+#   flip   also train on left-right mirrored copies and average the mirror at prediction time
+#   own    a second, training-only head learns who is on the ball in the CLEAN tracking
+#          (training.owner_target), on every match
+#   owntouch  own, plus heads for the team of the latest and of the next clean owner
+#   read   training-only heads learn the Metrica labels under the other two readings of the
+#          events (one-touch recoveries count; and a BALL LOST too)
+EXPERIMENTS = {
+    "flip": {"flip": True},
+    "own": {"owner_weight": 0.5},
+    "ownw": {"owner_weight": 1.5},
+    "read": {"reading_weight": 0.5},
+    "owntouch": {"owner_weight": 0.5, "touch_weight": 0.5},
+    "ownread": {"owner_weight": 0.5, "reading_weight": 0.5},
+}
+
+
+def exp_jobs(arm, seeds):
+    jobs = view_jobs(V3_VIEW, seeds)
+    for job, s in zip(jobs, seeds):
+        job["tag"] = "x_{}_s{}".format(arm, s)
+        job["cfg"] = dict(job["cfg"], owner_weight=0.0)      # the recipe of 2026-11-03 ...
+        job["cfg"].update(EXPERIMENTS[arm])                  # ... plus the experiment
+    return jobs
 
 
 KERNEL = r'''
@@ -157,8 +192,14 @@ def load_by_name(name):
         assert X.shape[1] == network.N_BASE + 2 * network.TOUCH_BLOCK
     else:
         X, sign = z["X"], z["swap_sign"]
-    return (X, sign, z["labels"], z["graded"],
-            tuple(tuple(int(v) for v in row) for row in z["halves"]))
+    block = (X, sign, z["labels"], z["graded"],
+             tuple(tuple(int(v) for v in row) for row in z["halves"]))
+    own = INDEX.get(training.owner_file(name))       # mtah-seq-own: the clean-owner target
+    if own is not None:
+        targets = training.load_extra_targets(own)
+        assert all(len(t) == len(X) for t in targets.values()), name
+        block += (targets,)
+    return block
 
 
 training.load_cached = load_by_name          # train() loads its "aux" files through this
@@ -231,18 +272,18 @@ for job in JOBS:
                                device=DEVICE)
         model.to_json(os.path.join(WORK, "{}_g{}.json".format(tag, g)))
         if not checked:                      # GPU inference == numpy inference, on a slice
-            X, sign, _, _, _ = blocks[(0, g)]
+            X, sign = blocks[(0, g)][:2]
             ref = network.logprobs_halves(model, X[:5000], sign, ((1, 0, 4999),))
             got = gpu_logprobs_halves(model, X[:5000], sign, ((1, 0, 4999),))
             print("gpu vs numpy max |diff|", float(np.abs(ref - got).max()), flush=True)
             assert np.abs(ref - got).max() < 1e-6
             checked = True
         for s in (0, 1, 2):
-            X, sign, _, _, halves = blocks[(s, g)]
+            X, sign, _, _, halves = blocks[(s, g)][:5]
             lps["s{}_g{}".format(s, g)] = gpu_logprobs_halves(model, X, sign, halves).astype(np.float32)
         by_game = job.get("eval_by_game") or {}
         for name in by_game.get(g, by_game.get(str(g), [])):
-            X, sign, _, _, halves = training.load_cached(name)
+            X, sign, _, _, halves = training.load_cached(name)[:5]
             extra[name[:-len(".npz")]] = gpu_logprobs_halves(model, X, sign, halves).astype(np.float32)
         print("{} held-out {} done in {:.0f} s".format(tag, g, time.time() - t), flush=True)
     np.savez(os.path.join(WORK, "lp_{}.npz".format(tag)), **lps)
@@ -285,6 +326,9 @@ def main(argv):
     elif name.startswith("dbv-"):                  # dbv-<edges|atd>-<seed digits>, e.g. dbv-atd-01
         _, arm, digits = name.split("-")
         jobs = view_jobs(arm, [int(c) for c in digits])
+    elif name.startswith("x-"):                    # x-<experiment>-<seed digits>, e.g. x-flip-01
+        _, arm, digits = name.split("-")
+        jobs = exp_jobs(arm, [int(c) for c in digits])
     else:
         jobs = json.loads(argv[1])
     device = "cpu" if "--cpu" in argv else "cuda"

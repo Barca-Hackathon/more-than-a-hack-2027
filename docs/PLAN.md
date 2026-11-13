@@ -9,7 +9,7 @@
 | **Ball & control** (P3) | **control v1 done.** `stages/control.py`: a team-symmetric logistic model trained on the external games, shipped as `models/control_v1.json` (retrained Nov 1 on the corrected labels); pipeline method **`v2`**, the submission until Nov 2 (superseded by v3, which still reads control.py's features). Held-out external spellF1 **0.669** since the external games also lose the ball in live play as BAR-ATH does (0.720 without those gaps; v1 0.434). The "more temporal context" it needed became v3 |
 | **External validation** (P4) | **harness v1 done; labels corrected Nov 1.** `external/metrica.py`, `external/degrade.py`, `validation/harness.py`, CLI `eval-external`; leave-one-game-out training for learned stages. Two label rules (`metrica.LABEL_RULES`): a BALL LOST never starts a possession, and a one-touch recovery is not one. Spells per game ~375 → ~245; most old "short possessions" were artefacts. `validation/tune.py` (CLI `tune` → [`docs/TUNING.md`](TUNING.md)) chooses decoder settings over 3 seeds under both label readings. Since Nov 1 `external/degrade.py` also hides the ball in live play at BAR-ATH's measured rate (see "Live-play ball gaps"). Since Nov 2 v3 also trains on open DFL and SkillCorner matches. **Next: show the ball during stoppages at the ATD's rate** (v3's open risk, see "What is frozen"), and validate on held-out DFL matches |
 | Decoder (P1) | `decode.viterbi_min_dead`: D runs ≥ `min_dead_s` (1 s), which closed a shortcut that capped the switch penalty |
-| **Sequence model** (v3) | **done; re-frozen Nov 3.** `seq/network.py`, `seq/training.py`, `seq/tuning.py`: a temporal CNN over the per-frame features, trained on the Metrica games plus open DFL and SkillCorner matches on a Kaggle GPU (`scripts/kaggle_seq.py`), shipped as an ensemble of 8 networks (`models/seq_v3_*.json`). Held-out external spellF1 **0.846** (alt labels 0.710; v2 0.669). Since Nov 3 the DFL and SkillCorner inputs show the ball while dead as the ATD does. That fixed the dead-ball miss found at the Nov 2 freeze: held-out DFL 0.668 → 0.789. BAR-ATH: 218 possessions, sha256 `4c927710…`. See "Sequence model (v3)" and "What is frozen" |
+| **Sequence model** (v3) | **done; re-frozen Nov 12.** `seq/network.py`, `seq/training.py`, `seq/tuning.py`: a temporal CNN over the per-frame features, trained on the Metrica games plus open DFL and SkillCorner matches on a Kaggle GPU (`scripts/kaggle_seq.py`), shipped as an ensemble of 8 networks (`models/seq_v3_*.json`). Held-out external spellF1 **0.853** at the shipped decoder (alt labels 0.721; leave-one-game-out 0.850 / 0.714; v2 0.669). Since Nov 3 the DFL and SkillCorner inputs show the ball while dead as the ATD does (held-out DFL 0.668 → 0.789). Since Nov 12 a training-only head learns who is on the ball in the clean tracking (+0.007 over the Nov 3 networks, [+0.002, +0.013]). BAR-ATH: 218 possessions, sha256 `2725f912…`. See "Sequence model (v3)", "Clean-owner head" and "What is frozen" |
 | **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD`, **`"v3"` since Nov 2**, `"v2"` before); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). Re-frozen twice the same day: after the label fix (switch 25 → 50, model retrained; sha256 `46fa8c61…`), then after adding live-play ball gaps to the degradation (w_control 3.2, switch 70, model retrained): sha256 `f1d4a191…`, 260 possessions. See "Freeze and reproducibility (M3)" |
 | Ball-free model + stretch (P5) | not started. v3 already reads player movement through ball gaps, so `shape.py` waits for a measured need |
 
@@ -31,6 +31,8 @@ uv run more-than-a-hack-2027 tune --jobs 3 --out docs/TUNING.md   # choose w_con
 uv run more-than-a-hack-2027 ablate --out docs/ABLATION.md   # held-out ablation table, 3 seeds (~5 min)
 uv run python scripts/kaggle_seq.py v3-heldout --push   # held-out v3 networks on a Kaggle GPU (~2 h)
 uv run python scripts/kaggle_seq.py v3-final --push     # the shipped v3 ensemble on a Kaggle GPU (~1 h)
+uv run more-than-a-hack-2027 owner-targets              # v3's training-only targets from the clean tracking
+uv run python scripts/kaggle_seq.py x-own-01 --push     # an experiment on the v3 recipe (held-out Metrica + DFL)
 uv run more-than-a-hack-2027 tune-seq --logprobs .cache/seq_heldout/lp_seq_v3_*.npz --out docs/TUNING_V3.md
 scripts/check_reproducibility.sh        # clean copy -> predict twice, validate, retrain model, tests
 uv run pytest -q
@@ -102,6 +104,7 @@ The terms and abbreviations used in this plan and the other files in `docs/`.
 | **sequence model, network** | `seq/network.py`: a temporal CNN that reads 123 per-frame inputs with a ±12 s view and gives log P(H), log P(A) and log P(D) for every frame. Trained on a Kaggle GPU. |
 | **ensemble, member** | The 8 shipped networks (`models/seq_v3_*.json`), whose log-probabilities are averaged. The members are training seeds 0–6 (`s0`…`s6`) and the own-head variant (`own`). |
 | **own-head variant** | A member whose DFL and SkillCorner labels train a second output head instead of the main one. |
+| **clean-owner head** | A second output of each network, used in training only (since Nov 12): which team's player is within 1.5 m of the ball in a training match's clean tracking, before degradation. Prediction never reads it. |
 | **touch channels** | 12 of v3's 123 inputs, 6 per team: the ball's owner is the closest player within 2 m, and the channels give how long the current touch spell has lasted, the time since the last spell and until the next, those spells' lengths, and how many players touched the ball within ±3 s. |
 | **decoder** | The Viterbi search over `H`/`A`/`D` (`stages/decode.py`) that turns per-frame evidence into labels. Its settings: **switch**, the penalty for `H`↔`A`; **stop**, for the ball going dead; **restart**, for play resuming; **w_seq**, the weight on the network's log-probabilities; and `min_dead_s`, the shortest stoppage (1 s). v3's are `pipeline.V3_DEFAULTS`. |
 | **freeze, re-freeze** | Fixing the submission method with its weights and settings, and recording the sha256 hash of its output file (see "Freeze and reproducibility"). |
@@ -112,8 +115,8 @@ The terms and abbreviations used in this plan and the other files in `docs/`.
 |---|---|
 | **P1–P5** | The five workstreams (see "Workstreams"). |
 | **M0–M3** | The milestones (see "Milestones"). |
-| **Kaggle kernel** | A script that runs on Kaggle's free GPUs (a T4), built by `scripts/kaggle_seq.py`. `v3-heldout` kernels write held-out log-probabilities (`lp_*.npz`); `v3-final` kernels write the shipped networks. |
-| **input files** | Cached sequence-model inputs in `.cache/seq_inputs/`: `s{seed}_g{game}` for Metrica, `dflc_` / `dflcv_` for DFL (old / ATD view), `scc_` / `sccv_` for SkillCorner. A `_t` suffix means the touch channels are included. |
+| **Kaggle kernel** | A script that runs on Kaggle's free GPUs (a T4), built by `scripts/kaggle_seq.py`. `v3-heldout` kernels write held-out log-probabilities (`lp_*.npz`); `v3-final` kernels write the shipped networks; `x-<experiment>-<seeds>` kernels test a change to the recipe on held-out Metrica games and DFL matches. |
+| **input files** | Cached sequence-model inputs in `.cache/seq_inputs/`: `s{seed}_g{game}` for Metrica, `dflc_` / `dflcv_` for DFL (old / ATD view), `scc_` / `sccv_` for SkillCorner. A `_t` suffix means the touch channels are included. `own_*` files hold the clean-owner targets, one per match (`owner-targets`). |
 
 ## Context
 
@@ -352,6 +355,7 @@ v2 stalled at ~0.67 held-out spellF1. Its control model's team accuracy stays at
   - A transposed convolution goes back to 25 Hz, plus a full-rate skip convolution.
   - The head outputs log P(H), log P(A), log P(D) per frame.
 - **Team symmetry:** the inputs have an exact team swap (teams exchanged, pitch rotated). Training sees both copies, and prediction averages the network on the frame and on its swap, so the output is exactly team-symmetric.
+- **Clean-owner head (since Nov 12):** in training, a second head learns which team's player is on the ball in the clean tracking, on every match (see "Clean-owner head"). Prediction reads the first head only.
 - **Prediction needs numpy only.** The weights ship as JSON, and torch is used only to train.
 - **Decoder:** the same Viterbi with a 1 s minimum stoppage, on 0.5 × the log-probabilities. Settings: switch 10, stop 25, restart 25, chosen held out ([`docs/TUNING_V3.md`](TUNING_V3.md)).
 - **The shipped model is an ensemble:** 8 networks of the same recipe, 7 training seeds plus one variant that learns the extra data through its own output head. Their log-probabilities are averaged (the renormalised geometric mean of the probabilities).
@@ -375,12 +379,14 @@ The extra matches fill half of every training batch and train the same output he
 
 `scripts/kaggle_seq.py` builds a Kaggle kernel from this checkout's `seq/network.py` and `seq/training.py`. The kernel reads private Kaggle datasets that hold the cached inputs above. Those are built from the open data only: never from `data/`, which may not be redistributed, and with no organiser code. The degraded copies replay BAR-ATH's per-frame missing-player counts, a list of integers with no tracking.
 
-- **Recipe:** 3200 steps of 12 crops × 160 s; AdamW, one-cycle learning rate 2e-3, weight decay 0.05, dropout 0.3, input noise 0.1; extra loss weight on possessions under 4 s (×2) and within ±12 frames of a possession change (×1).
+- **Recipe:** 3200 steps of 12 crops × 160 s; AdamW, one-cycle learning rate 2e-3, weight decay 0.05, dropout 0.3, input noise 0.1; extra loss weight on possessions under 4 s (×2) and within ±12 frames of a possession change (×1); the clean-owner head's loss at weight 0.5.
 - **Speed:** ~5 min per network on a T4.
 - **Splitting:** `v3-heldout-01` or `v3-final-456o` trains only those members (digits are training seeds, `o` the own-head variant), so the eight networks run as several kernels on Kaggle's two GPU slots.
 - **Watchdog:** a kernel that logs nothing for 20 minutes dumps its stacks and exits as an error. On Nov 3 a session hung two minutes into training and held its GPU for 8 hours; the longest normal silence is under 5 minutes.
 - **`v3-heldout`** trains one network per held-out Metrica game and writes held-out log-probabilities, which `tune-seq --logprobs` and `ablate` score locally.
 - **`v3-final`** trains on all three games and writes `models/seq_v3_*.json`.
+- **`x-<experiment>-<seeds>`** (for example `x-own-01`) trains the Nov 3 recipe plus one change from `EXPERIMENTS`, holding out DFL matches with each Metrica game as `dbv-atd` does.
+- **Datasets:** the kernels also read `mtah-seq-own`, the clean-owner targets (`more-than-a-hack-2027 owner-targets` writes them; one small array per match, open data only).
 
 ### Results (held out, degraded with live-play gaps, Metrica games 1–3, 3 evaluation seeds)
 
@@ -395,9 +401,10 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
 | + SkillCorner matches (one-touch rule) | 0.837–0.839 |
 | + touch channels, one network | 0.830–0.839 (own-head variant 0.824) |
 | ensemble of the 8 touch networks (Nov 2) | 0.845 (alt labels 0.704) |
-| **+ ball shown while dead as in the ATD, decoder retuned (Nov 3, shipped)** | **0.846** (alt labels 0.710) |
+| + ball shown while dead as in the ATD, decoder retuned (Nov 3) | 0.846 (alt labels 0.710) |
+| **+ clean-owner head in training (Nov 12, shipped)** | **0.850** (alt labels 0.714) |
 
-- **Training seeds matter as much as most changes:** one network varies by ±0.005 with its seed. The touch channels alone are within that noise. Averaging networks is what gains: the ensemble beats its mean member by +0.010 and its best by +0.006.
+- **Training seeds matter as much as most changes:** one network varies by ±0.005 with its seed. The touch channels alone are within that noise. Averaging networks is what gains: the ensemble beats its mean member by +0.010 and its best by +0.006. (Nov 2 networks. With the Nov 12 networks the ensemble beats its mean member by +0.005 and ties with its best.)
 - **Picking the best of many ensemble subsets would be selection bias.** Subsets of the networks trained along the way scored 0.829–0.846. The shipped ensemble is every network of the final recipe, not a chosen subset.
 - **Tried, no gain** (each within ±0.005 of its reference):
   - restart-team evidence on top of v3;
@@ -409,9 +416,10 @@ How v3 got there. Each row is the leave-one-game-out estimate under the main lab
   - a stride of 2 instead of 5;
   - ending training with a Metrica-only phase.
 
-**At the shipped decoder settings** ([`docs/ABLATION.md`](ABLATION.md), paired bootstrap against v2): the ensemble scores 0.846 (seed sd 0.001), +0.177 [+0.157, +0.198]. One network (training seed 0) scores 0.841, +0.172 [+0.152, +0.193]. macroF1 rises 0.878 → 0.963 and team accuracy 0.923 → 0.963, with 244 possessions per game (true 246). The Nov 2 ensemble, at its own decoder, scored 0.845, +0.176 [+0.155, +0.198]: on Metrica, the Nov 3 change is neutral, as it should be.
+**At the shipped decoder settings** ([`docs/ABLATION.md`](ABLATION.md), paired bootstrap against v2): the ensemble scores 0.853 (seed sd 0.005), +0.184 [+0.165, +0.205]. The seven seed networks score 0.843–0.854 alone (training seed 0, the table's row: 0.854). macroF1 rises 0.878 → 0.963 and team accuracy 0.923 → 0.964, with 245 possessions per game (true 246). The Nov 3 ensemble scores 0.846, +0.177 [+0.157, +0.198], and the Nov 2 one, at its own decoder, 0.845.
 
-- **Under the alternative label reading** (one-touch recoveries count), v3 scores 0.716 (Nov 2: 0.704). v2's 0.595 under that reading is the comparison.
+- **By game and degradation seed** the 9 runs score 0.839–0.882 (Nov 3: 0.820–0.873); per game 0.856 / 0.845 / 0.859. A single run moves by ±0.015 with the degradation seed alone, so "0.85 on every run" would need a mean near 0.88.
+- **Under the alternative label reading** (one-touch recoveries count), v3 scores 0.721 (Nov 3: 0.716; Nov 2: 0.704). v2's 0.595 under that reading is the comparison.
 - **Clean tracking:** v2 gains +0.107 from clean tracking, so input quality is still the largest remaining cost. v3 has not been measured on clean tracking.
 
 ### Dead ball with the ball in view (Nov 3)
@@ -441,11 +449,65 @@ The Nov 2 freeze found v3 calling D on only 5% of BAR-ATH's frames with the ball
 - **What this does not measure:** the DFL test replays the same BAR-ATH masks the recipe trained on. It shows the network learned to read a visible dead ball, not that BAR-ATH's dead ball behaves like DFL's in other ways (where it rests, how it is moved). The GT-free check on BAR-ATH is in "What is frozen".
 - `kaggle_seq.py`'s `V3_VIEW = "atd"` makes this the v3 recipe. `view="edges"` rebuilds the Nov 2 job lists.
 
+### Clean-owner head (Nov 12)
+
+**Where the error was** (the Nov 3 ensemble, held out, 3 games × 3 seeds, 0.846):
+
+| measurement | spellF1 |
+|---|---|
+| per game and seed (9 runs) | 0.820–0.873 |
+| oracle: the true team on every frame both call live | 0.974 |
+| oracle: perfect dead-ball calls | 0.864 |
+| at IoU 0.3 / 0.5 / 0.7 | 0.894 / 0.857 / 0.776 |
+| the shipped networks on the games they trained on | 0.941–0.972 |
+
+- **Team calls on short possessions are what is left.** Recall at IoU 0.5 is 0.08 for possessions under 1 s, 0.54 for 1–2 s, 0.72 for 2–4 s, 0.84 for 4–8 s and 0.93–0.99 above. Of the 36 missed per game, 20 are never called for their team and 13 are swallowed by a longer prediction.
+- **The labels are not the problem.** In the clean tracking the labelled team is the nearest to the ball on 73% of a missed possession's frames, as on a found one. 15–20% of the misses have no ball in view at all.
+- **Tracking noise is not the main limit either.** One network trained on the Metrica games alone scores 0.843 held out on clean tracking against 0.807 on degraded (1600 steps, one seed, decoder w_seq 0.5 / switch 10 / stop 10): +0.036.
+- **The number of labelled games is.** The networks fit their training games at 0.94–0.97. Training on one Metrica game instead of two costs 0.026 (0.781 against 0.807, same setting). So the shipped networks, which train on all three games, should do a little better than the leave-one-game-out numbers say.
+
+**Change.** A second output head, used in training only, learns which team's player is within 1.5 m of the ball **in the clean tracking** (`training.owner_target`: home, away, nobody; skipped where the clean ball is not tracked). The degraded inputs blur exactly that: the ball is smoothed and noisy, the player on it may be dropped, and it is hidden in gaps. The target exists for all 30 matches and does not depend on what their possession labels mean, so the 27 DFL and SkillCorner matches teach the network to read through the degradation. Its loss is added with weight 0.5 (`owner_weight`). Prediction is unchanged: `network.py` reads the first head only.
+
+**Test.** The same harness as the dead-ball view experiment: each held-out Metrica game also holds out its DFL matches (`DFL_FOLDS`), 4 training seeds per arm, all decoded at the Nov 3 settings (`scripts/kaggle_seq.py x-<experiment>-<seeds>`). The reference arm is the Nov 3 recipe (`dbv-atd`).
+
+**Rule:** every per-seed difference on held-out Metrica points the same way, the 4-seed ensemble gains more than the ±0.008 between ensembles of one recipe, and held-out DFL does not drop by more than 0.005.
+
+| arm (training seeds) | one network: Metrica main / alt | one network: DFL | ensemble: Metrica main / alt | ensemble: DFL |
+|---|---|---|---|---|
+| Nov 3 recipe (4) | 0.841 / 0.712 | 0.776 | 0.846 / 0.715 | 0.782 |
+| **+ clean-owner head (4)** | **0.850 / 0.718** | 0.777 | **0.855 / 0.721** | 0.780 |
+| + left-right mirrored copies, averaged at prediction (4) | 0.840 / 0.711 | 0.776 | 0.845 / 0.711 | 0.780 |
+| + heads for the other two label readings (2) | 0.840 / 0.711 | 0.775 | | |
+| + clean-owner head and heads for the latest and next clean owner (2) | 0.849 / 0.715 | 0.782 | | |
+| + clean-owner head at weight 1.5 instead of 0.5 (2) | 0.846 / 0.716 | 0.783 | | |
+
+- **The clean-owner head passed.** Per seed it gains +0.011, +0.011, +0.003 and +0.010 on Metrica (main labels). The ensemble gains +0.009 (paired bootstrap, 90% interval [+0.003, +0.015]) and +0.006 under the alt labels ([−0.001, +0.012]). All three games reach 0.85 (0.857 / 0.855 / 0.852; before 0.835 / 0.851 / 0.851), and the worst of the 9 runs rises from 0.817 to 0.838. Held-out DFL is unchanged (−0.002).
+- **Confirmed on the shipped recipe's own held-out runs** (`v3-heldout`, 8 networks per game, all seven DFL matches in training): the ensemble gains +0.007 over the Nov 3 one ([+0.002, +0.013]; alt +0.005 [+0.000, +0.010]), every one of the seven seed networks gains (+0.007 to +0.013), and the worst of the 9 runs rises from 0.820 to 0.839. `tune-seq` picks the same decoder settings as on Nov 3.
+- **On BAR-ATH (GT-free):** the output keeps 218 possessions and a dead share of 45.3%, and 1.1% of the graded frames change (spellF1 0.950 between the two outputs). The two halves of the new ensemble agree at 0.947 (Nov 3: 0.933).
+- **Not adopted:**
+  - mirrored copies: no gain with 4 seeds. One network at 1600 steps had gained 0.013 on Nov 1, which was seed noise;
+  - heads for the other label readings (one-touch recoveries count; and a BALL LOST too): no gain;
+  - heads for the latest and next clean owner on top: the same on Metrica (−0.002), +0.007 on DFL, 2 seeds. Not enough to add two more heads.
+  - a weight of 1.5 on the clean-owner head: −0.005 on Metrica and +0.008 on DFL against the same two seeds at 0.5. More clean-owner training leans towards DFL; 0.5 stays.
+- **A stoppage prior in the decoder** (P2's open item) does not help. The dead-ball stage's posterior, added to the network's D evidence (4-seed Nov 3 ensembles, held out):
+
+  | weight on the stage's log-odds (clipped at ±5) | Metrica main / alt | DFL | BAR-ATH: D where the ball is seen |
+  |---|---|---|---|
+  | 0 (as shipped) | 0.846 / 0.715 | 0.784 | 14.0% |
+  | 0.2 | 0.848 / 0.717 | 0.783 | 14.9% |
+  | 0.4 | 0.844 / 0.714 | 0.782 | 15.5% |
+  | 0.8, ball-seen frames only | 0.836 / 0.709 | 0.774 | 17.1% |
+
+  Small weights change nothing, and the weights that move BAR-ATH towards the expected ~20% cost 0.01 on both validation sets.
+- **How stable the BAR-ATH output is (GT-free).** Two halves of the Nov 3 ensemble (4 networks each) agree with each other at spellF1 0.933 on BAR-ATH and 0.957 on the held-out Metrica games (0.936–0.979). With one of the 8 networks left out, the output agrees with the full ensemble at 0.986. BAR-ATH is a little further from the training data than a held-out Metrica game is.
+
 ### Open items for v3
 
 1. ~~**Dead ball with the ball in view**~~ done (Nov 3): see the section above.
 2. **Per-input ablation** (dead-ball channels, control features, touch channels), with ≥ 4 training seeds per row: one network's seed noise is ±0.005.
-3. **v3 on clean tracking**, for the "cost of ATD-like input" row that v2 has.
+3. ~~**v3 on clean tracking**~~ measured on Nov 12 for one Metrica-only network: +0.036 (see "Clean-owner head"). The full recipe on clean tracking is still unmeasured.
+4. **More clean-tracking targets.** The heads for the latest and next clean owner, and a weight of 1.5, both gained on held-out DFL (+0.007, +0.008) and not on Metrica, with 2 seeds each. Worth 4 seeds if DFL is trusted as much as Metrica.
+5. **More labelled games** are what the model lacks (see "Clean-owner head"). No other open match has Metrica's event labels; hand labels on other games are allowed by the rules.
 
 ## External validation: the only place we tune
 
@@ -513,13 +575,14 @@ The Nov 2 freeze found v3 calling D on only 5% of BAR-ATH's frames with the ball
 
 ### What is frozen
 
-- **Method:** `pipeline.SUBMISSION_METHOD = "v3"`, with `V3_DEFAULTS` (w_seq 1.0, switch 10, stop 25, restart 25, 1 s minimum stoppage; [`docs/TUNING_V3.md`](TUNING_V3.md)) and the shipped ensemble `models/seq_v3_*.json` (8 networks, trained by `scripts/kaggle_seq.py v3-final`). The inputs also use `models/control_v1.json` for control.py's features. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
-- **Output today (re-frozen Nov 3 on v3 with the dead-ball fix):** 218 possessions (mean 16.0 s), sha256 `4c927710506eb87416886c642beb5be610e12bb70020fd1da8ae72fb12673c3a`. `predict` takes ~90 s: 8 networks × 2 team views, numpy on CPU.
+- **Method:** `pipeline.SUBMISSION_METHOD = "v3"`, with `V3_DEFAULTS` (w_seq 1.0, switch 10, stop 25, restart 25, 1 s minimum stoppage; [`docs/TUNING_V3.md`](TUNING_V3.md)) and the shipped ensemble `models/seq_v3_*.json` (8 networks, trained by `scripts/kaggle_seq.py v3-final`; since Nov 12 with the clean-owner head). The inputs also use `models/control_v1.json` for control.py's features. `uv run more-than-a-hack-2027 predict --out evaluation/results/<team>.csv` runs exactly this.
+- **Output today (re-frozen Nov 12 on networks trained with the clean-owner head):** 218 possessions (mean 15.9 s), sha256 `2725f912090f86365b3a0120de8d95ffaf752da1a2766379b322e786acc3a172`. `predict` takes ~80 s: 8 networks × 2 team views, numpy on CPU.
 - **Public 5-minute check** (logged after the choice; correctness only, band ±0.41 with 17 possessions):
 
   | method | spellF1 | macroF1 | possessions (true 17) |
   |---|---|---|---|
-  | **v3 (Nov 3)** | 0.593 | 0.914 | 10 |
+  | **v3 (Nov 12)** | 0.593 | 0.913 | 10 |
+  | v3 (Nov 3) | 0.593 | 0.914 | 10 |
   | v3 (Nov 2) | 0.571 | 0.741 | 11 |
   | v2 | 0.588 | 0.862 | 15 |
 
@@ -537,12 +600,13 @@ The Nov 2 freeze found v3 calling D on only 5% of BAR-ATH's frames with the ball
   - **Fix:** the DFL and SkillCorner inputs now replay the ATD's stoppage masks, and held-out DFL matches measure the effect (see "Dead ball with the ball in view").
   - **What the numbers suggest:** with ~43% of the match dead and the ball seen on ~28% of dead frames, about 20% of ball-seen frames should be dead. The Nov 3 v3 is at 14%, and its dead share is inside the normal 40–45%. v2 likely over-calls D (52%).
   - **Left:** which stoppages the Nov 3 v3 still rides through cannot be told without labels. The P2 row under "Workstreams" has the next steps.
-- **Why the switch clears the rule below:** held out, v3 is +0.177 over v2 ([+0.157, +0.198], paired bootstrap in [`docs/ABLATION.md`](ABLATION.md)). That is an order of magnitude beyond the noise floor. The Nov 3 re-freeze cleared its own rule, stated before the runs, on held-out DFL (see "Dead ball with the ball in view"). On Metrica it is neutral.
+- **Why the switch clears the rule below:** held out, v3 is +0.184 over v2 ([+0.165, +0.205], paired bootstrap in [`docs/ABLATION.md`](ABLATION.md)). That is an order of magnitude beyond the noise floor. The Nov 3 re-freeze cleared its own rule, stated before the runs, on held-out DFL (see "Dead ball with the ball in view"). On Metrica it is neutral. The Nov 12 re-freeze cleared its rule with 4 training seeds per arm, and again on the 8-network held-out runs (see "Clean-owner head").
 - **History:**
   - first freeze (Nov 1 morning): v2, switch 25 and the model trained on the old labels, 290 possessions, sha256 `ead4e48720eca1a96edb20ec5f14eadb2acdab09a25e4f3d5d506ebb93bd1212`. It cleared the rule below on the corrected labels: −0.024 [−0.031, −0.018] for the old settings;
   - after the label fix: v2, w_control 1.6, switch 50, 252 possessions, sha256 `46fa8c61b3e9d7895d42726bddeb1a2d487e369515cdabe43bc0b18a74787d17`;
   - after adding live-play ball gaps (Nov 1 evening): v2, w_control 3.2, switch 70, control model retrained on the gapped games, 260 possessions, sha256 `f1d4a1919a3e05dd354bfacc9d63b7583eb4f262c26c0eca3fc97052898a0550`. The step from w 1.6 / switch 50 was a tuning tie that followed the harness change, not an improvement (see "Live-play ball gaps");
-  - v3 (Nov 2): DFL and SkillCorner inputs that hid the ball while dead, w_seq 0.5, switch 10, stop 25, 218 possessions, sha256 `f26b32ba809b8d7d258f0426c234a4d01f2c604b54fafada1f5657dda94469d4`. Replaced on Nov 3 because it rarely called a stoppage with the ball in view.
+  - v3 (Nov 2): DFL and SkillCorner inputs that hid the ball while dead, w_seq 0.5, switch 10, stop 25, 218 possessions, sha256 `f26b32ba809b8d7d258f0426c234a4d01f2c604b54fafada1f5657dda94469d4`. Replaced on Nov 3 because it rarely called a stoppage with the ball in view;
+  - v3 (Nov 3): the ball shown while dead as in the ATD, w_seq 1.0, 218 possessions, sha256 `4c927710506eb87416886c642beb5be610e12bb70020fd1da8ae72fb12673c3a`. Replaced on Nov 12 by the same recipe with the clean-owner head (held out +0.007).
 - **Changing it** (an M2 improvement): the new method must beat v3 on the held-out external games by more than the ablation's bootstrap interval. Since Nov 3, held-out DFL matches (`kaggle_seq.py`, `DFL_FOLDS`) are a second validation set, for what Metrica cannot show, such as the ball while dead. A change judged there states its rule before the runs, and Metrica must not drop. Then set `SUBMISSION_METHOD`, rerun `ablate` and `scripts/check_reproducibility.sh`, and record the new hash here. For v3 the bar is high: ensembles of the same networks already differ by ±0.008, so a change needs several training seeds behind it (≥ 4) before it counts.
 
 ### Reproducibility check (`scripts/check_reproducibility.sh`)
@@ -565,6 +629,8 @@ Re-freeze (Nov 1, after the label fix): 75 files, all six checks pass with `EXPE
 Re-freeze on v3 (Nov 2): 100 files, the 8 network files 4.6 MB each, all under the 5 MB limit. All six checks pass with `EXPECTED_SHA256=f26b32ba…`. 112 tests pass in the copy; the 6 torch training tests skip there, because the copy installs no torch: prediction needs numpy only.
 
 Re-freeze on v3 with the dead-ball fix (Nov 3): the 8 retrained network files are again 4.6 MB each. All six checks pass with `EXPECTED_SHA256=4c927710…`. 115 tests pass in the copy and the same 6 torch tests skip.
+
+Re-freeze on v3 with the clean-owner head (Nov 12): 100 files, the 8 retrained network files still 4.6 MB each (the extra head adds 195 weights). All six checks pass from a clone of the commit (`--head`) with `EXPECTED_SHA256=2725f912…`. 122 tests pass in the copy and 8 torch tests skip.
 
 ### What the ablation says ([`docs/ABLATION.md`](ABLATION.md))
 
@@ -591,15 +657,15 @@ Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected label
 
 Nothing was removed. Every component either helps or is within noise.
 
-**v3** (rows added Nov 2, updated at the Nov 3 re-freeze): the 8-network ensemble is +0.177 [+0.157, +0.198] over v2, and one network alone +0.172 [+0.152, +0.193]. The reference row "v3 as frozen on Nov 2", decoded at its own settings, is +0.176 [+0.155, +0.198]. The v2 rows above still describe the features v3 reads through control.py and the dead-ball stage. v3 has no per-input ablation yet: each one needs several GPU-trained networks to rise above the ±0.005 seed noise.
+**v3** (rows added Nov 2, updated at the Nov 3 and Nov 12 re-freezes): the 8-network ensemble is +0.184 [+0.165, +0.205] over v2, and the training-seed-0 network alone +0.185 [+0.166, +0.206] (the other seeds score 0.843–0.851 alone). The reference rows "v3 as frozen on Nov 2", decoded at its own settings, and "v3 as frozen on Nov 3" are +0.176 [+0.155, +0.198] and +0.177 [+0.157, +0.198]. The v2 rows above still describe the features v3 reads through control.py and the dead-ball stage. v3 has no per-input ablation yet: each one needs several GPU-trained networks to rise above the ±0.005 seed noise.
 
 ## Workstreams (5 people)
 
 | who | owns | next deliverable |
 |---|---|---|
 | **P1 Platform & decoder** | platform, `stages/decode.py`, final assembly, reproducibility | Tech doc assembly; re-run the freeze (`ablate`, `scripts/check_reproducibility.sh --head`) after each change |
-| **P2 Dead ball** | `data/tagging`, `stages/ball` (cleaning), `stages/deadball`, `stages/hmm2`, `stages/restart` | v3 still calls fewer stoppages with the ball in view than the stage (51% vs 100% of those frames on BAR-ATH): measure GT-free where the ATD's dead ball rests and how it moves, and try a stoppage prior in the decoder, judged on held-out DFL |
-| **P3 Ball & control → sequence model** | `stages/ball`, `stages/control`, `seq/`, `scripts/kaggle_seq.py` | Retrain v3 on data with the ball visible during stoppages; per-input ablation with ≥ 4 training seeds |
+| **P2 Dead ball** | `data/tagging`, `stages/ball` (cleaning), `stages/deadball`, `stages/hmm2`, `stages/restart` | v3 still calls fewer stoppages with the ball in view than the stage (51% vs 100% of those frames on BAR-ATH): measure GT-free where the ATD's dead ball rests and how it moves. A stoppage prior in the decoder was tried on Nov 12 and does not help (see "Clean-owner head") |
+| **P3 Ball & control → sequence model** | `stages/ball`, `stages/control`, `seq/`, `scripts/kaggle_seq.py` | Per-input ablation with ≥ 4 training seeds; more clean-tracking targets (open item 4) |
 | **P4 External validation** | `external/metrica`, `external/degrade`, `external/dfl`, `external/skillcorner`, `validation/harness`, `validation/tune`; the hyperparameter search | Ball visible during stoppages in the external inputs; held-out DFL matches as a second validation set |
 | **P5 Ball-free + stretch** | `shape`, `tag_prior`; stretch | Pseudo-label set + shape classifier (critical: the ball is missing in long blocks) |
 
@@ -609,8 +675,8 @@ Everyone writes the tech-doc section for their own module. P1 compiles it.
 
 - **M0, Nov 1–2.** ✅ Skeleton, interfaces and baseline parity; `.cache/` gitignored. Still to do: rename the tactical mp4 to `data/tactical/BAR-ATH_tactical.mp4`, and make sure `origin` (`meroo893/more-than-a-hack-2027`) is public before submitting.
 - **M1, Nov 3–6.** v1 of every module; first fused submission; external harness running. ✅ Done early (v2, Nov 1).
-- **M2, Nov 7–11.** Improvements over the frozen method, each cleared by the held-out rule. Started early with v3 (Nov 2), which replaced the planned HSMM, boundary snapping and fusion weights with one learned model. Its dead-ball risk was fixed on Nov 3 (ball shown while dead in the DFL and SkillCorner inputs, judged on held-out DFL). **Nov 8 go/no-go for the stretch work.**
-- **M3, Nov 12–14.** Feature freeze; ablation table for the doc (external harness); reproducibility check from a clean clone. ✅ The tooling is done and passes on v2 (Nov 1) and on v3 (Nov 2, sha256 `f26b32ba…`; Nov 3, `4c927710…`). At the real freeze: commit, then rerun `ablate` and `scripts/check_reproducibility.sh --head`, and record the hash.
+- **M2, Nov 7–11.** Improvements over the frozen method, each cleared by the held-out rule. Started early with v3 (Nov 2), which replaced the planned HSMM, boundary snapping and fusion weights with one learned model. Its dead-ball risk was fixed on Nov 3 (ball shown while dead in the DFL and SkillCorner inputs, judged on held-out DFL). On Nov 12 the clean-owner head was added (+0.007 held out); mirrored copies, extra label-reading heads and a stoppage prior in the decoder were tried and dropped. **Nov 8 go/no-go for the stretch work.**
+- **M3, Nov 12–14.** Feature freeze; ablation table for the doc (external harness); reproducibility check from a clean clone. ✅ The tooling is done and passes on v2 (Nov 1) and on v3 (Nov 2, sha256 `f26b32ba…`; Nov 3, `4c927710…`; Nov 12, `2725f912…`). At the real freeze: commit, then rerun `ablate` and `scripts/check_reproducibility.sh --head`, and record the hash.
 - **M4, Nov 15–16.** Final `<team>.csv` + tech doc; validate; **submit Nov 16**.
 
 ## Stretch (P5 after M1, gated at Nov 8)

@@ -215,6 +215,13 @@ def _cmd_dfl_inputs(args):
     return 0
 
 
+def _cmd_owner_targets(args):
+    from .seq import training
+
+    training.build_owner_targets()
+    return 0
+
+
 def _cmd_skillcorner_inputs(args):
     import warnings
 
@@ -359,6 +366,11 @@ def build_parser():
                         "(edges), or shown as in the competition ATD's stoppages (atd; files "
                         "*v_*)")
     p.set_defaults(func=_cmd_skillcorner_inputs)
+
+    p = sub.add_parser("owner-targets",
+                       help="cache the sequence model's training-only targets from the clean "
+                            "tracking of the Metrica, DFL and SkillCorner matches (own_*.npz)")
+    p.set_defaults(func=_cmd_owner_targets)
 
     p = sub.add_parser("tune-seq",
                        help="held-out decoder choice for v3 on the external games (torch)")
