@@ -11,7 +11,7 @@
 | Decoder (P1) | `decode.viterbi_min_dead`: D runs ≥ `min_dead_s` (1 s), which closed a shortcut that capped the switch penalty |
 | **Sequence model** (v3) | **done; re-frozen Nov 12.** `seq/network.py`, `seq/training.py`, `seq/tuning.py`: a temporal CNN over the per-frame features, trained on the Metrica games plus open DFL and SkillCorner matches on a Kaggle GPU (`scripts/kaggle_seq.py`), shipped as an ensemble of 8 networks (`models/seq_v3_*.json`). Held-out external spellF1 **0.853** at the shipped decoder (alt labels 0.721; leave-one-game-out 0.850 / 0.714; v2 0.669). Since Nov 3 the DFL and SkillCorner inputs show the ball while dead as the ATD does (held-out DFL 0.668 → 0.789). Since Nov 12 a training-only head learns who is on the ball in the clean tracking (+0.007 over the Nov 3 networks, [+0.002, +0.013]). BAR-ATH: 218 possessions, sha256 `2725f912…`. See "Sequence model (v3)", "Clean-owner head" and "What is frozen" |
 | **M3 freeze tooling** | **done (Nov 1)**, ahead of the M2 work. `predict` defaults to the frozen method (`pipeline.SUBMISSION_METHOD`, **`"v3"` since Nov 2**, `"v2"` before); `ablate` writes the held-out ablation table [`docs/ABLATION.md`](ABLATION.md) (3 seeds, paired bootstrap). Re-frozen twice the same day: after the label fix (switch 25 → 50, model retrained; sha256 `46fa8c61…`), then after adding live-play ball gaps to the degradation (w_control 3.2, switch 70, model retrained): sha256 `f1d4a191…`, 260 possessions. See "Freeze and reproducibility (M3)" |
-| Ball-free model + stretch (P5) | not started. v3 already reads player movement through ball gaps, so `shape.py` waits for a measured need |
+| Ball-free model + stretch (P5) | not started. v3 already reads player movement through ball gaps, so `shape.py` waits for a measured need. The video and broadcast stretch items were measured on Nov 13 and closed: at most +0.004 to +0.010 held out (see "Stretch") |
 
 How to run what exists now:
 
@@ -653,7 +653,7 @@ Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected label
 - **The 1 s minimum stoppage is essential:** −0.061 [−0.069, −0.053]. At switch 50, a turnover through a short fake D is much cheaper than a switch, and `viterbi_min_dead` is what closes that route.
 - **Indistinguishable from zero:** restart-team evidence, +0.001 [−0.001, +0.003]. The external games have no Smart Tagging, so the part of it that comes from the tags can only matter on BAR-ATH, and the harness cannot measure that.
 - **Noise floor:** v2's spread across degradation seeds is 0.007. A config difference below ~0.01 means nothing without a paired interval.
-- **Clean tracking is worth +0.107** (+0.057 before the live-play gaps). That is roughly the most this pipeline can gain from better input. It matters for the Nov 8 go/no-go on video ball detection, which can recover only part of that gap.
+- **Clean tracking is worth +0.107** (+0.057 before the live-play gaps). That is roughly the most this pipeline can gain from better input. It matters for the Nov 8 go/no-go on video ball detection, which can recover only part of that gap. For v3 the same question was measured on Nov 13: filling every live-play ball gap is worth +0.010 (see "Broadcast and video").
 
 Nothing was removed. Every component either helps or is within noise.
 
@@ -675,14 +675,52 @@ Everyone writes the tech-doc section for their own module. P1 compiles it.
 
 - **M0, Nov 1–2.** ✅ Skeleton, interfaces and baseline parity; `.cache/` gitignored. Still to do: rename the tactical mp4 to `data/tactical/BAR-ATH_tactical.mp4`, and make sure `origin` (`meroo893/more-than-a-hack-2027`) is public before submitting.
 - **M1, Nov 3–6.** v1 of every module; first fused submission; external harness running. ✅ Done early (v2, Nov 1).
-- **M2, Nov 7–11.** Improvements over the frozen method, each cleared by the held-out rule. Started early with v3 (Nov 2), which replaced the planned HSMM, boundary snapping and fusion weights with one learned model. Its dead-ball risk was fixed on Nov 3 (ball shown while dead in the DFL and SkillCorner inputs, judged on held-out DFL). On Nov 12 the clean-owner head was added (+0.007 held out); mirrored copies, extra label-reading heads and a stoppage prior in the decoder were tried and dropped. **Nov 8 go/no-go for the stretch work.**
+- **M2, Nov 7–11.** Improvements over the frozen method, each cleared by the held-out rule. Started early with v3 (Nov 2), which replaced the planned HSMM, boundary snapping and fusion weights with one learned model. Its dead-ball risk was fixed on Nov 3 (ball shown while dead in the DFL and SkillCorner inputs, judged on held-out DFL). On Nov 12 the clean-owner head was added (+0.007 held out); mirrored copies, extra label-reading heads and a stoppage prior in the decoder were tried and dropped. **Nov 8 go/no-go for the stretch work.** Decided on Nov 13: no-go, the measured ceiling is +0.004 to +0.010 (see "Stretch").
 - **M3, Nov 12–14.** Feature freeze; ablation table for the doc (external harness); reproducibility check from a clean clone. ✅ The tooling is done and passes on v2 (Nov 1) and on v3 (Nov 2, sha256 `f26b32ba…`; Nov 3, `4c927710…`; Nov 12, `2725f912…`). At the real freeze: commit, then rerun `ablate` and `scripts/check_reproducibility.sh --head`, and record the hash.
 - **M4, Nov 15–16.** Final `<team>.csv` + tech doc; validate; **submit Nov 16**.
 
-## Stretch (P5 after M1, gated at Nov 8)
+## Stretch (P5 after M1, gated at Nov 8): closed on Nov 13
+
+Neither item was built. The Nov 13 analysis below puts their best case at +0.004 to +0.010 held out, which is inside what the organisers call noise (0.04) and cannot be confirmed on BAR–ATH. The submission keeps the frozen v3 input: tactical tracking only.
+
+The two items as planned:
 
 1. **Video ball detection on the tactical mp4, local GPU only.** The T&Cs forbid uploading the match video to cloud LLMs, and cloud compute is a grey area. Use a public detector trained on other games, and run it only on graded frames with no ball. Back-project to the pitch with `load_homography.unproject`, and keep a detection only if it is consistent with the trajectory. Drop the idea if it recovers less than ~20% of the gaps or shows no gain.
 2. **Broadcast replay segments as a stoppage signal.** Only if time allows. It needs the broadcast aligned to tactical by matching the two ATDs.
+
+### Broadcast and video (Nov 13)
+
+No ground truth was used. Nothing here feeds the code: the offsets are measurements, not constants.
+
+**The broadcast tracking can be put on the tactical timeline.** The organisers ship it unsynchronised, but matching the two ball tracks gives one offset per half: tactical frame = broadcast frame + 4,014 in the first half and + 26,920 in the second. It is stable to ±1 frame across each half, and the two ball positions are a median 0.8 m apart.
+
+| Measure (graded frames) | Value |
+|---|---|
+| Tactical ball seen | 59.3% |
+| Broadcast ball seen, mapped to tactical frames | 52.3% |
+| Either | 64.5% |
+| Tactical ball gaps the broadcast fills | 12.8% (8,253 frames) |
+| Ball missing while v3 calls live play | 5,789 frames (3.9 min) |
+| ...of which the broadcast has the ball | 52.5% (3,042 frames) |
+| The two balls more than 5 m apart when both are seen | 13% of frames, in 253 bursts of about 1 s |
+| v3 calls D when the broadcast has no pitch view (replay, close-up) | 86.7% (24.8% otherwise) |
+
+- 91% of the tactical ball gaps are stoppages v3 already calls dead, so they need no filling.
+- The broadcast covers half of the 3.9 live minutes without a ball. But its ball is more than 5 m from the tactical one 13% of the time. The distance grows with ball speed (median 0.7 m below 5 m/s, 1.9 m at 15–30 m/s), which fits balls in the air seen from two camera positions. The homography's reprojection error does not predict it, so it cannot be filtered out that way.
+- Broadcast replays agree with v3's dead calls. But perfect dead-ball calls are worth only +0.011 (see "Clean-owner head"), so replays, cuts and whistle audio have little to add.
+
+**Held-out ceiling test.** The frozen held-out networks (8 per game) scored Metrica games 1–3 on degradation seeds 0 and 1. Only the degradation changed (`external/degrade.py`: `live_gap_params`, `live_gaps`, `dropout`); nothing was retrained. Each row assumes the filled-in data is as good as the tactical tracking, so it is an upper bound.
+
+| Input change | Stands for | spellF1 main | Gain | spellF1 alt | Gain |
+|---|---|---|---|---|---|
+| none (as frozen) | | 0.854 | | 0.718 | |
+| half the live-play ball gaps filled | broadcast ball fusion | 0.858 | +0.004 | 0.720 | +0.003 |
+| all live-play ball gaps filled | a perfect ball detector on the video | 0.864 | +0.010 | 0.727 | +0.010 |
+| no players missing | a perfect player fill from broadcast or video | 0.862 | +0.007 | 0.727 | +0.009 |
+
+Per seed, the broadcast-fusion gain was +0.008 and +0.001. The other two rows ranged from +0.004 to +0.016.
+
+**Decision.** Real gains would be below these ceilings: the fills are noisier than the tactical ball, and the networks were not trained on fused input. A pixel detector would also have to run on a 4 GB laptop GPU, because the T&Cs keep the video off cloud services. So no broadcast or video input goes into the submission.
 
 ## Verification
 
