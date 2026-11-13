@@ -1,4 +1,4 @@
-"""Robustness audits of the frozen v3: where could it fail on BAR-ATH in ways the held-out score
+"""Robustness audits of v3 as frozen on Nov 12: where could it fail on BAR-ATH in ways the held-out score
 does not show?
 
     uv run more-than-a-hack-2027 robust --audits bytes anchors --out docs/ROBUSTNESS.md
@@ -16,7 +16,9 @@ it has something to be read against:
 
 The audits (AUDITS): bytes, margin, anchors, inputs, perturb, support, ridge. Each writes its rows
 to .cache/robust/<audit>.json; `markdown()` renders whatever is there, so one audit can be re-run
-without the others. Nothing here changes a prediction: candidate fixes are only scored.
+without the others. Nothing here changes a prediction: fixes are only scored. The one that
+cleared the rule, the kickoff-wait rule, ships in pipeline.run_v3 since Nov 13; the audits decode
+without it (decode_lp), so the report keeps showing the failure and what the rule does to it.
 """
 
 import glob
@@ -50,18 +52,10 @@ FPS = 25
 
 AUDITS = ("bytes", "margin", "anchors", "inputs", "perturb", "support", "ridge")
 
-# The dead-ball block's channel names, as network.dead_inputs sorts them.
-DEAD_NAMES = tuple(sorted(
-    ["post_logit", "llr", "mask", "anchor", "lvl_c", "spread", "acc_burst", "acc_burst75",
-     "since_seen", "until_seen", "since_out", "until_out", "last_outside", "since_stop_start",
-     "until_restart"]
-    + ["{}_{}{}".format(k, d, w) for w in network.DEAD_WINDOWS for k in ("lvl", "seen", "mov")
-       for d in ("p", "f")]))
-_GEO = network.BALL_BLOCK + 2 * network.TEAM_BLOCK
-ANCHOR = _GEO + DEAD_NAMES.index("anchor")
-MASK = _GEO + DEAD_NAMES.index("mask")          # the dead-ball stage's own live/dead call (+-1)
-LEVEL = _GEO + DEAD_NAMES.index("lvl_p200")     # mean log team speed over the past 8 s
-WAIT_MIN_S = 10.0
+DEAD_NAMES = network.DEAD_NAMES
+ANCHOR = network.dead_channel("anchor")
+MASK = network.dead_channel("mask")             # the dead-ball stage's own live/dead call (+-1)
+WAIT_MIN_S = pipeline.V3_DEFAULTS["wait_min_s"]
 
 
 def channel_names():
@@ -128,8 +122,10 @@ def average_halves(lps, halves):
 
 
 def decode_lp(lp, graded, halves, cfg=None, pin=None, pin_bonus=1000.0):
-    """v3's labels from log-probabilities, as pipeline.v3_from_logprobs. pin: (n,) bool frames
-    forced to D (a candidate fix for the anchors audit)."""
+    """The networks' log-probabilities through v3's decoder, WITHOUT the kickoff-wait rule that
+    pipeline.run_v3 applies since Nov 13: the audits measure the networks and the decoder, and
+    the rule is one of the fixes they score. pin: (n,) bool frames forced to D (a fix under
+    test; kickoff_wait_pin gives the shipped rule)."""
     top = dict(pipeline.V3_DEFAULTS, **(cfg or {}))    # decoder keys only, as seq/tuning.py
     evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
     if pin is not None:
@@ -438,38 +434,9 @@ def barath_checks(ctx, dead, labels):
             "set_pieces_stage": covered(stage_restarts), "halves": halves}
 
 
-def kickoff_waits(X, graded, halves):
-    """[(first, stop, peak)] per half that starts inside a dead-ball anchor: the wait before the
-    kickoff as the stage sees it (deadball.build_anchors). peak is the highest 8 s team speed in
-    the wait, as a multiple of this match's typical live speed (the median over the frames the
-    stage calls live). Players waiting for a kickoff, or passing a ball among themselves, stay
-    under 1; a wait that reaches live-play speed is a missed kickoff, where the stage tied the
-    half to a later one."""
-    anchors = X[:, ANCHOR] > 0.5
-    stage = X[:, MASK] > 0
-    level = X[:, LEVEL]
-    live = np.median(level[graded & ~stage])
-    out = []
-    for _, first, last in halves:
-        block = anchors[first:last + 1]
-        n = len(block) if block.all() else int(np.argmin(block))
-        if n:
-            out.append((first, first + n, float(np.exp(level[first:first + n].max() - live))))
-    return out
-
-
-def wait_is_pinned(first, stop, peak, min_s=WAIT_MIN_S):
-    return (stop - first) >= min_s * FPS and peak < 1.0
-
-
 def kickoff_wait_pin(X, graded, halves, min_s=WAIT_MIN_S):
-    """(n,) bool: the waits before a kickoff of at least min_s on which nobody plays (the
-    candidate fix). Shorter waits are left to the networks, which were trained on them."""
-    pin = np.zeros(len(X), dtype=bool)
-    for first, stop, peak in kickoff_waits(X, graded, halves):
-        if wait_is_pinned(first, stop, peak, min_s):
-            pin[first:stop] = True
-    return pin
+    """The frames pipeline.run_v3 pins to D (network.kickoff_wait)."""
+    return network.kickoff_wait(X, graded, halves, FPS, min_s)
 
 
 def training_only_runs():
@@ -493,10 +460,10 @@ def audit_anchors(log=print):
     kinds = checks = None
 
     def wait_rows(run):
-        for first, stop, peak in kickoff_waits(run.X, run.graded, run.halves):
+        for first, stop, peak in network.kickoff_waits(run.X, run.graded, run.halves):
             row = {"group": run.group, "match": run.name, "seconds": (stop - first) / FPS,
                    "peak": peak, "ball_seen": float(run.seen[first:stop].mean()),
-                   "pinned": bool(wait_is_pinned(first, stop, peak))}
+                   "pinned": bool(network.wait_is_pinned(first, stop, peak, FPS, WAIT_MIN_S))}
             if run.truth is not None:
                 row["truly_dead"] = float((run.truth[first:stop] == pm.D).mean())
             if run.lps:
@@ -1056,7 +1023,8 @@ def _md_waits(data):
               "The rule leaves them to the networks.".format(
                   len(short), float(np.median([w["seconds"] for w in short])) if short else 0.0,
                   sum(d < 0.5 for d in dead)), "",
-              "Candidate fix: pin a wait to D in the decoder when it lasts at least {:.0f} s and "
+              "The fix, shipped since Nov 13 (`pipeline.V3_DEFAULTS[\"wait_min_s\"]`, "
+              "`network.kickoff_wait`): pin a wait to D in the decoder when it lasts at least {:.0f} s and "
               "its peak speed stays under the match's typical live speed.".format(WAIT_MIN_S), ""]
     table = []
     for group in dict.fromkeys(f["group"] for f in data["wait_fix"]):
@@ -1210,12 +1178,15 @@ SECTIONS = {"bytes": _md_bytes, "margin": _md_margin, "anchors": _md_anchors,
 
 
 def markdown():
-    lines = ["# Robustness audits of the frozen v3", "",
+    lines = ["# Robustness audits of v3", "",
              "Generated by `more-than-a-hack-2027 robust` "
              "(src/more_than_a_hack_2027/validation/robustness.py). Do not edit by hand.", "",
              "Every BAR-ATH number here is GT-free: no label of the competition match is read. "
-             "Held-out Metrica and DFL matches give each one a baseline. Nothing in this file "
-             "changes the submission; candidate fixes are scored, not applied.", ""]
+             "Held-out Metrica and DFL matches give each one a baseline. The audits are of v3 as "
+             "frozen on Nov 12 (sha256 `2725f912…`, 218 possessions): the networks and the "
+             "decoder. Fixes are scored here, not applied. One cleared the rule in docs/PLAN.md "
+             "and ships since Nov 13, the kickoff-wait rule; only the byte-stability runs, "
+             "which call `predict`, include it.", ""]
     for audit in AUDITS:
         data = _load(audit)
         if data is not None:

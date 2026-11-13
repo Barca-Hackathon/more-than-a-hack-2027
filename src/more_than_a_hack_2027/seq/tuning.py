@@ -127,8 +127,10 @@ def score_named(lps, cfg=None):
         with np.load(os.path.join(training.CACHE_DIR, name + ".npz")) as z:
             labels, graded, X = z["labels"], z["graded"], z["X"]
             halves = tuple(tuple(int(v) for v in row) for row in z["halves"])
-        pred = decode.decode_match(np.where(graded[:, None], top["w_seq"] * lp, 0.0), halves,
-                                   trans, min_dead=int(round(top["min_dead_s"] * 25)))
+        evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
+        pipeline.pin_waits(evidence, X, graded, halves, 25, top)
+        pred = decode.decode_match(evidence, halves, trans,
+                                   min_dead=int(round(top["min_dead_s"] * 25)))
         seen = X[:, network.BALL_SEEN] > 0.5
         dead_seen = graded & (labels == 2) & seen
         rows.append({"name": name, **harness.score(labels, pred),

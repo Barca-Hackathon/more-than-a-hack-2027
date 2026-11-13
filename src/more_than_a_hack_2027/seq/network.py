@@ -142,7 +142,63 @@ def dead_inputs(ctx, ball, dead):
     cols["since_stop_start"] = np.log1p(_since(ctx, starts))
     cols["until_restart"] = np.log1p(_since(ctx, ends, future=True))
     names = tuple(sorted(cols))
+    if names != DEAD_NAMES:
+        raise AssertionError("DEAD_NAMES is out of step with dead_inputs")
     return names, np.column_stack([cols[k] for k in names])
+
+
+# dead_inputs' channel names in its (sorted) order, so a channel can be found in cached inputs.
+DEAD_NAMES = tuple(sorted(
+    ["post_logit", "llr", "mask", "anchor", "lvl_c", "spread", "acc_burst", "acc_burst75",
+     "since_seen", "until_seen", "since_out", "until_out", "last_outside", "since_stop_start",
+     "until_restart"]
+    + ["{}_{}{}".format(k, d, w) for w in DEAD_WINDOWS for k in ("lvl", "seen", "mov")
+       for d in ("p", "f")]))
+
+
+def dead_channel(name):
+    """Index in the model inputs of one of dead_inputs' channels."""
+    return BALL_BLOCK + 2 * TEAM_BLOCK + DEAD_NAMES.index(name)
+
+
+def kickoff_waits(X, graded, halves):
+    """[(first, stop, peak)] per half that starts inside a dead-ball anchor: the wait before the
+    kickoff as the dead-ball stage sees it (deadball.build_anchors). peak is the highest 8 s team
+    speed in the wait, as a multiple of this match's typical live speed (the median over the
+    graded frames the stage calls live). Players waiting for a kickoff, or passing a ball among
+    themselves, stay under 1; a wait that reaches live-play speed is a missed kickoff, where the
+    stage tied the half to a later one."""
+    anchors = X[:, dead_channel("anchor")] > 0.5
+    stage_dead = X[:, dead_channel("mask")] > 0
+    level = X[:, dead_channel("lvl_p200")]          # mean log team speed over the past 8 s
+    live = graded & ~stage_dead
+    if not live.any():
+        return []
+    typical = np.median(level[live])
+    out = []
+    for _, first, last in halves:
+        block = anchors[first:last + 1]
+        n = len(block) if block.all() else int(np.argmin(block))
+        if n:
+            out.append((first, first + n, float(np.exp(level[first:first + n].max() - typical))))
+    return out
+
+
+def wait_is_pinned(first, stop, peak, fps, min_s):
+    return (stop - first) >= min_s * fps and peak < 1.0
+
+
+def kickoff_wait(X, graded, halves, fps, min_s):
+    """(n,) bool: the waits before a kickoff that last at least min_s and in which the players
+    never reach the match's typical live speed. The ball is dead there by the rules of the game,
+    but the networks call much of such a wait live when the ball is passed around in view
+    (docs/ROBUSTNESS.md); pipeline.run_v3 pins these frames to D. Shorter waits are often the
+    kickoff itself and are left to the networks."""
+    pin = np.zeros(len(X), dtype=bool)
+    for first, stop, peak in kickoff_waits(X, graded, halves):
+        if wait_is_pinned(first, stop, peak, fps, min_s):
+            pin[first:stop] = True
+    return pin
 
 
 def _team_block(ctx, team, bx, by, bvx, bvy, sign, pvx, pvy):

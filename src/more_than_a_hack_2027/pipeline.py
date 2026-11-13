@@ -182,7 +182,12 @@ V3_DEFAULTS = {
     "restart": 25.0,
     "min_dead_s": 1.0,
     "w_restart": 0.0,      # restart-team evidence (restart.py); the model sees no Smart Tagging
+    # A wait before a kickoff of at least this long, in which the players never reach live-play
+    # speed, is D whatever the networks say (network.kickoff_wait; 0 = off). Added Nov 13: the
+    # networks called 63% of BAR-ATH's 117 s second-half wait live (docs/ROBUSTNESS.md).
+    "wait_min_s": 10.0,
 }
+WAIT_PIN = 1000.0          # added to D's evidence on a pinned frame: far above any log-probability
 
 
 def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
@@ -205,6 +210,7 @@ def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
     lp = network.ensemble_logprobs(ctx, models, X, swap_sign)
     graded = ctx.half_of_frame > 0
     evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
+    pin_waits(evidence, X, graded, ctx.halves, ctx.fps, top)
     calls = ()
     if top["w_restart"]:
         if tags is None:
@@ -218,20 +224,41 @@ def run_v3(ctx, cfg=None, return_parts=False, tags=None, model=None):
     return labels
 
 
+def pin_waits(evidence, X, graded, halves, fps, top):
+    """Force D (in place) on the waits before a kickoff that network.kickoff_wait finds in the
+    model inputs X. Every v3 decoder goes through this, held-out scoring included."""
+    from .seq import network
+    if top["wait_min_s"]:
+        wait = network.kickoff_wait(X, graded, halves, fps, top["wait_min_s"])
+        evidence[wait & graded, decode.D] += WAIT_PIN
+    return evidence
+
+
 def _decode_v3(ctx, evidence, top):
     trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
     return decode.decode_match(evidence, ctx.halves, trans,
                                min_dead=int(round(top["min_dead_s"] * ctx.fps)))
 
 
-def v3_from_logprobs(ctx, lp, cfg=None):
+def v3_from_logprobs(ctx, lp, cfg=None, X=None):
     """v3's labels from precomputed (n, 3) log-probabilities (e.g. held-out ones made on a GPU);
-    the same decoder as run_v3. Restart evidence needs the dead-ball stage, so it is refused."""
-    top, _ = split_cfg(cfg, V3_DEFAULTS)
+    the same decoder as run_v3. X: the model inputs the log-probabilities were made from; None
+    rebuilds them from ctx (only the kickoff-wait rule reads them). Restart evidence is refused."""
+    from .seq import network
+    top, stages = split_cfg(cfg, V3_DEFAULTS)
     if top["w_restart"]:
         raise ValueError("v3_from_logprobs has no restart evidence: set w_restart to 0")
     graded = ctx.half_of_frame > 0
-    return _decode_v3(ctx, np.where(graded[:, None], top["w_seq"] * lp, 0.0), top)
+    evidence = np.where(graded[:, None], top["w_seq"] * lp, 0.0)
+    if top["wait_min_s"]:
+        if X is None:
+            from .stages import deadball
+            from .stages.ball import clean_ball
+            ball = clean_ball(ctx, stages["ball"])
+            dead = deadball.detect(ctx, ball, stages["deadball"])
+            X, _ = network.inputs(ctx, ball, dead, stages["control"], touch=True)
+        pin_waits(evidence, X, graded, ctx.halves, ctx.fps, top)
+    return _decode_v3(ctx, evidence, top)
 
 
 # The frozen submission method (docs/PLAN.md, M3). `predict` without --method runs this, and

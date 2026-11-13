@@ -131,21 +131,45 @@ def test_input_shift_flags_only_the_shifted_channel():
     assert base.max() < 0.03
 
 
+LEVEL = network.dead_channel("lvl_p200")
+
+
 def test_kickoff_wait_pins_a_long_slow_wait_only():
     n = 3000
     X = np.zeros((n, len(robustness.channel_names())), dtype=np.float32)
     halves = ((1, 0, 1499), (2, 1500, n - 1))
     graded = np.ones(n, dtype=bool)
     X[:, robustness.MASK] = -1.0
-    X[:, robustness.LEVEL] = np.log(2.0)                 # live play at 2 m/s
+    X[:, LEVEL] = np.log(2.0)                 # live play at 2 m/s
     for a, b in ((0, 400), (1500, 1900)):                # both halves wait 16 s for a kickoff
         X[a:b, robustness.ANCHOR] = 1.0
         X[a:b, robustness.MASK] = 1.0
-        X[a:b, robustness.LEVEL] = np.log(1.2)
-    X[1600:1700, robustness.LEVEL] = np.log(3.0)         # ... but the second holds live play
-    waits = robustness.kickoff_waits(X, graded, halves)
+        X[a:b, LEVEL] = np.log(1.2)
+    X[1600:1700, LEVEL] = np.log(3.0)         # ... but the second holds live play
+    waits = network.kickoff_waits(X, graded, halves)
     assert [(a, b) for a, b, _ in waits] == [(0, 400), (1500, 1900)]
     assert waits[0][2] < 1.0 < waits[1][2]
     pin = robustness.kickoff_wait_pin(X, graded, halves)
     assert pin[:400].all() and not pin[400:].any()
     assert not robustness.kickoff_wait_pin(X, graded, halves, min_s=20.0).any()
+
+
+def test_run_v3_and_saved_logprobs_pin_the_same_wait():
+    from more_than_a_hack_2027 import pipeline
+    n = 1000
+    X = np.zeros((n, len(robustness.channel_names())), dtype=np.float32)
+    graded = np.ones(n, dtype=bool)
+    halves = ((1, 0, n - 1),)
+    X[:, robustness.MASK] = -1.0
+    X[:, LEVEL] = np.log(2.0)
+    X[:300, robustness.ANCHOR] = 1.0
+    X[:300, robustness.MASK] = 1.0
+    X[:300, LEVEL] = np.log(1.0)
+    lp = np.log(np.tile([0.9, 0.05, 0.05], (n, 1)))      # the networks say H throughout
+    top = dict(pipeline.V3_DEFAULTS)
+    evidence = pipeline.pin_waits(lp.copy(), X, graded, halves, 25, top)
+    trans = decode.transition_matrix(top["switch"], top["stop"], top["restart"])
+    labels = decode.decode_match(evidence, halves, trans, min_dead=25)
+    assert (labels[:300] == "D").all() and (labels[300:] == "H").all()
+    off = pipeline.pin_waits(lp.copy(), X, graded, halves, 25, dict(top, wait_min_s=0.0))
+    np.testing.assert_array_equal(off, lp)
