@@ -7,7 +7,6 @@ import numpy as np
 from ._paths import ensure_repo_on_path
 
 ensure_repo_on_path()
-import baseline as starter_baseline  # noqa: E402  starter/baseline.py
 import possession_metrics as pm  # noqa: E402
 
 
@@ -28,10 +27,26 @@ def check_labels(labels, ctx):
         raise ValueError("{} graded frames are X -- write a label instead".format(abstained))
 
 
+def write_csv(path, labels):
+    """The organisers' frame,label format, with LF line endings on every platform.
+
+    starter_baseline.write_submission opens the file in text mode, so on Windows every row ends
+    in CRLF and the file's sha256 differs from a Linux or macOS build with the same labels. The
+    rules ask for the same file, so the line ending is fixed here.
+    """
+    folder = os.path.dirname(path)
+    if folder:
+        os.makedirs(folder, exist_ok=True)
+    with open(path, "w", newline="\n") as handle:
+        handle.write("frame,label\n")
+        handle.writelines("{},{}\n".format(frame, label) for frame, label in enumerate(labels))
+    return path
+
+
 def write(path, labels, ctx):
     """Check, write and re-validate through the official reader. Returns a summary dict."""
     check_labels(labels, ctx)
-    starter_baseline.write_submission(path, labels)
+    write_csv(path, labels)
 
     table = pm.read_label_csv(path)
     reason = pm.validate_submission(table, ctx.n_frames)

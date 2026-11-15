@@ -637,6 +637,8 @@ Re-freeze on v3 with the clean-owner head (Nov 12): 100 files, the 8 retrained n
 
 Re-freeze with the kickoff-wait rule (Nov 13): no model file changes. All six checks pass from a clone of the commit (`--head`) with `EXPECTED_SHA256=39e5382a…`. 132 tests pass in the copy and 8 torch tests skip. `predict` under the 8 BLAS settings of the byte-stability audit writes the same hash each time.
 
+Windows (Nov 15): the first run on Windows 11 wrote the same labels with CRLF line endings, sha256 `00eeb9d3…`, because the organisers' `write_submission` opens the file in text mode. `submission.write_csv` now writes `\n` on every platform (`tests/test_submission.py`), and Windows writes `39e5382a…`. The submission is unchanged. On Windows, step 5 still fails: the control model retrained there differs from the shipped one by 4e-16 in one weight (BLAS rounding), which changes no label.
+
 ### What the ablation says ([`docs/ABLATION.md`](ABLATION.md))
 
 Held-out, degraded with live-play ball gaps, 3 games × 3 seeds, corrected labels, decoder settings fixed at v2's (w_control 3.2, switch 70):
