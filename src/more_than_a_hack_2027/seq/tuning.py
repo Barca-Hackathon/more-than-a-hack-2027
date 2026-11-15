@@ -26,15 +26,20 @@ from . import network, training
 
 W_SEQ = (0.25, 0.5, 1.0)
 SWITCH = (10.0, 20.0, 35.0, 50.0)
+# `tune-seq --extended` adds these. The shipped switch (10) is the lowest of SWITCH, so the grid
+# never showed whether a smaller penalty does better. The default grid stays as it is:
+# docs/TUNING_V3.md and the decoder-ridge audit (validation/robustness.py) are built on it.
+SWITCH_EXTRA = (2.0, 5.0)
 STOP = (6.0, 10.0, 15.0, 25.0)            # stop = restart penalty
 TRAIN_SEEDS = (0, 1, 2, 3, 4, 5)
 EVAL_SEEDS = (0, 1, 2)
 
 
-def grid():
+def grid(extended=False):
+    switches = SWITCH_EXTRA + SWITCH if extended else SWITCH
     return {"w{:.2f}_s{:03.0f}_d{:02.0f}".format(w, s, d):
             {"w_seq": w, "switch": s, "stop": d, "restart": d}
-            for w, s, d in itertools.product(W_SEQ, SWITCH, STOP)}
+            for w, s, d in itertools.product(W_SEQ, switches, STOP)}
 
 
 def _labels(games):
@@ -139,7 +144,7 @@ def score_named(lps, cfg=None):
     return pd.DataFrame(rows)
 
 
-def markdown(runs, configs, train_seeds, eval_seeds, games, cfg, model_note=None):
+def markdown(runs, configs, train_seeds, eval_seeds, games, cfg, model_note=None, top=12):
     table = tune.summary(runs).sort_values(["criterion", "macro_f1", "config"],
                                            ascending=[False, False, True])
     chosen = tune.choose(runs, list(games))
@@ -163,7 +168,7 @@ def markdown(runs, configs, train_seeds, eval_seeds, games, cfg, model_note=None
         "| macroF1 main | seed sd main | possessions / game main |",
         "|---|---|---|---|---|---|---|---|---|---|",
     ]
-    for _, r in table.head(12).iterrows():
+    for _, r in table.head(top).iterrows():
         c = configs[r["config"]]
         mark = " **(chosen)**" if r["config"] == chosen else ""
         lines.append("| {:.2f} | {:.0f} | {:.0f}{} | {:.3f} | {:.3f} | {:.3f} | {:.3f} | {:.3f} | "
@@ -172,7 +177,7 @@ def markdown(runs, configs, train_seeds, eval_seeds, games, cfg, model_note=None
                                                 r["macro_f1"], r["seed_sd"], r["n_pred"]))
     lines += [
         "",
-        "(top 12 of {} configs)".format(len(configs)),
+        "(top {} of {} configs)".format(min(top, len(configs)), len(configs)),
         "",
         "Leave-one-game-out estimate: the config is picked on the other two games and scored on "
         "the held-out one (whose model never saw it).",

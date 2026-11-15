@@ -265,7 +265,7 @@ def _cmd_tune_seq(args):
     from .seq import tuning
 
     warnings.simplefilter("ignore", RuntimeWarning)
-    configs = tuning.grid()
+    configs = tuning.grid(extended=args.extended)
     note = None
     if args.logprobs:
         runs = tuning.score_logprobs(tuning.load_logprobs(args.logprobs), configs)
@@ -274,7 +274,8 @@ def _cmd_tune_seq(args):
         runs = tuning.run(tuple(args.train_seeds), tuple(args.seeds), tuple(args.games),
                            configs=configs)
     text = tuning.markdown(runs, configs, tuple(args.train_seeds), tuple(args.seeds),
-                            tuple(args.games), None, model_note=note)
+                            tuple(args.games), None, model_note=note,
+                            top=len(configs) if args.extended else 12)
     print(text)
     if args.out:
         with open(args.out, "w") as handle:
@@ -408,6 +409,10 @@ def build_parser():
     p.add_argument("--logprobs", nargs="+", default=None,
                    help="score these held-out log-prob files (scripts/kaggle_seq.py), averaged "
                         "as an ensemble, instead of training locally")
+    p.add_argument("--extended", action="store_true",
+                   help="also try switch penalties below the shipped one (tuning.SWITCH_EXTRA) "
+                        "and print every config; write it beside, not over, "
+                        "docs/TUNING_V3.md")
     p.add_argument("--note", default=None,
                    help="with --logprobs: the Model line of the report (what made the files; "
                         "default: the v3 held-out files, seq/tuning.HELDOUT_NOTE)")

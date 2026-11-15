@@ -414,3 +414,16 @@ def test_an_extra_head_without_any_target_is_refused():
            "owner_weight": 0.5}
     with pytest.raises(ValueError, match="owner"):
         training.train([_training_block(0)], cfg, log=None)
+
+
+def test_extended_grid_adds_lower_switch_penalties_only():
+    from more_than_a_hack_2027 import pipeline
+    from more_than_a_hack_2027.seq import tuning
+
+    base, extended = tuning.grid(), tuning.grid(extended=True)
+    assert len(base) == len(tuning.W_SEQ) * len(tuning.SWITCH) * len(tuning.STOP)
+    assert all(extended[name] == cfg for name, cfg in base.items())   # the default grid is kept
+    extra = {cfg["switch"] for name, cfg in extended.items() if name not in base}
+    assert extra == set(tuning.SWITCH_EXTRA)
+    assert max(extra) < pipeline.V3_DEFAULTS["switch"] == min(tuning.SWITCH)
+    assert len(extended) == len(base) + len(tuning.W_SEQ) * len(extra) * len(tuning.STOP)
