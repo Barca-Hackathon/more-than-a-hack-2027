@@ -1,5 +1,26 @@
 # More than a Hack 2027 — Phase 1: Ball Possession
 
+> ## Team iRianEnjoyers: our submission
+>
+> This fork holds our solution. The technical document is [`docs/iRianEnjoyers.md`](docs/iRianEnjoyers.md),
+> and the full working log is [`docs/PLAN.md`](docs/PLAN.md). The code is in `src/more_than_a_hack_2027/`.
+>
+> To regenerate the submitted file, you need [uv](https://docs.astral.sh/uv/) ≥ 0.12 (it installs Python 3.14)
+> and the match data bundle unpacked into `data/` (or `MTAH_DATA_DIR` set):
+>
+> ```bash
+> uv sync --frozen
+> uv run more-than-a-hack-2027 predict --out evaluation/results/iRianEnjoyers.csv   # ~80 s on CPU
+> uv run python evaluation/validate_submission.py evaluation/results/iRianEnjoyers.csv
+> shasum -a 256 evaluation/results/iRianEnjoyers.csv
+> # 39e5382a8dd01638bab6ea9b34cc87c5240fa475d34754c3c0ec5970e6ea955a
+> ```
+>
+> `scripts/check_reproducibility.sh --head` runs the full check from a clean clone.
+> The organisers' README follows unchanged.
+
+---
+
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)
 and the [Mobile World Capital Barcelona](https://www.mwcbarcelona.com)**, at the Talent Arena in Barcelona.
 
